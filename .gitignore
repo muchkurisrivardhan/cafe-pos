@@ -1,0 +1,4 @@
+# your sales data - never goes to GitHub
+pos.db*
+*.zip
+__pycache__/

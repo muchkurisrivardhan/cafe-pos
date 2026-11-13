@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>Café POS</title>
+<style>
+:root{--bg:#f4f1ec;--card:#fff;--ink:#1c1a17;--mute:#8b857b;--line:#e7e2d9;--acc:#b3122b;--ok:#17794f;--busy:#fff3d6;--busyb:#ebc56b}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0}
+body{font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink)}
+button{font:inherit;color:inherit;cursor:pointer;border:1px solid var(--line);background:var(--card);border-radius:10px;padding:10px 14px;touch-action:manipulation}
+button:active{transform:scale(.97)}
+button:disabled{opacity:.45;pointer-events:none}
+.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+.ok{background:var(--ok);border-color:var(--ok);color:#fff;font-weight:600}
+.warn{color:var(--acc);border-color:transparent;background:none}
+input,select,textarea{font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;width:100%;background:#fff;color:inherit}
+label{display:block;font-size:14px;color:var(--mute)}
+label input,label textarea{margin-top:4px;color:var(--ink)}
+table{width:100%;border-collapse:collapse}
+td,th{padding:8px 6px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{font-size:13px;color:var(--mute);font-weight:500}
+h2{margin:0 0 12px;font-size:20px}
+h3{margin:18px 0 10px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute)}
+.r{text-align:right}.mute{color:var(--mute)}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card{background:var(--card);border-radius:14px;padding:14px;margin-bottom:12px}
+
+nav{display:flex;gap:4px;align-items:center;padding:8px 12px;padding-top:max(8px,env(safe-area-inset-top));background:var(--ink);color:#fff;position:sticky;top:0;z-index:5;overflow-x:auto}
+nav b{margin-right:auto;font-size:17px;white-space:nowrap;padding-right:12px}
+nav button{background:none;border:0;color:#b9b3a8;white-space:nowrap}
+nav button.on{background:#fff;color:var(--ink)}
+main>section{padding:12px 16px}
+
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+.tile{min-height:96px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;font-size:19px;font-weight:600}
+.tile small{font-size:13px;font-weight:400;color:var(--mute)}
+.tile.busy{background:var(--busy);border-color:var(--busyb)}
+.tile.add{border-style:dashed;color:var(--acc)}
+
+#order:not([hidden]){display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:12px;align-items:start}
+.bar{display:flex;gap:8px;align-items:center;margin-bottom:10px}
+.bar input{flex:1}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:6px}
+.chips button{white-space:nowrap;padding:8px 12px;font-size:14px}
+.chips button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+.items{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px}
+.item{position:relative;min-height:74px;display:flex;flex-direction:column;justify-content:center;text-align:left;font-size:15px;line-height:1.25}
+.item small{color:var(--mute);margin-top:4px}
+.item i{position:absolute;top:-6px;right:-6px;background:var(--acc);color:#fff;font-style:normal;font-size:13px;font-weight:700;border-radius:99px;min-width:24px;height:24px;display:grid;place-items:center}
+.ticket{position:sticky;top:64px;max-height:calc(100vh - 80px);overflow:auto}
+.ticket td{padding:6px 2px;font-size:15px}
+.tag{font-size:11px;padding:1px 6px;border-radius:99px;background:var(--busy);color:#8a5a00;white-space:nowrap}
+.tag.ready{background:#dff3e8;color:var(--ok)}
+.qty{white-space:nowrap}.qty button{width:34px;height:34px;padding:0}
+.x{border:0;background:none;color:var(--mute);padding:4px 8px}
+.ticket .stack{display:grid;gap:8px;margin-top:10px}
+.big{font-size:20px;font-weight:700}
+
+.kots{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.kot{border-top:6px solid var(--busyb);margin:0}
+.kot.late{border-top-color:var(--acc)}
+.kot ul{padding-left:0;list-style:none;font-size:18px;margin:10px 0}
+.kot li{padding:4px 0;border-bottom:1px dashed var(--line)}
+.kot .note{background:var(--busy);padding:6px 8px;border-radius:8px;margin-bottom:10px}
+.kot button{width:100%}
+
+.stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:12px}
+.stats .card{margin:0}.stats b{display:block;font-size:22px}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form{display:grid;gap:12px;max-width:560px}
+.wrap{flex-wrap:wrap}.wrap input{min-width:140px}
+
+dialog{border:0;border-radius:16px;padding:20px;width:min(440px,94vw);color:var(--ink)}
+dialog::backdrop{background:#0007}
+dialog form{display:grid;gap:12px}
+.seg{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.seg button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+
+@media (max-width:760px){
+  #order:not([hidden]){grid-template-columns:minmax(0,1fr)}
+  .ticket{position:static;max-height:none}
+  .cols{grid-template-columns:1fr}
+}
+#receipt{display:none}
+@media print{
+  @page{margin:3mm}
+  body{background:#fff}
+  body>*{display:none!important}
+  #receipt{display:block!important;width:72mm;font:12px/1.35 ui-monospace,Consolas,monospace;color:#000}
+  #receipt hr{border:0;border-top:1px dashed #000;margin:6px 0}
+  #receipt .c{text-align:center}
+  #receipt .row{align-items:flex-start}
+  #receipt .big{font-size:15px}
+}
+</style>
+</head>
+<body>
+<nav>
+  <b id="rname">POS</b>
+  <button data-view="floor">Tables</button>
+  <button data-view="kitchen">Kitchen</button>
+  <button data-view="reports">Reports</button>
+  <button data-view="menu">Menu</button>
+  <button data-view="settings">Settings</button>
+</nav>
+
+<main>
+<section id="floor">
+  <h3>Dine-in</h3>
+  <div id="tables" class="tiles"></div>
+  <h3>Takeaway &amp; Delivery</h3>
+  <div id="others" class="tiles"></div>
+</section>
+
+<section id="order" hidden>
+  <div>
+    <div class="bar"><button id="back">‹ Tables</button><input id="search" type="search" placeholder="Search menu" autocomplete="off"></div>
+    <div id="cats" class="chips"></div>
+    <div id="grid" class="items"></div>
+  </div>
+  <aside class="card ticket">
+    <h2 id="otitle"></h2>
+    <div id="ticket"></div>
+    <input id="note" placeholder="Note for kitchen (e.g. Maggi dry, less spicy)" autocomplete="off" style="margin-top:10px">
+    <div class="row big" style="margin-top:12px"><span>Subtotal</span><span id="osub"></span></div>
+    <div class="mute" style="font-size:13px">+ GST at billing</div>
+    <div class="stack">
+      <button id="sendKot" class="pri">Send to kitchen</button>
+      <button id="billBtn" class="ok">Bill &amp; print</button>
+      <button id="cancelOrder" class="warn">Cancel order</button>
+    </div>
+  </aside>
+</section>
+
+<section id="kitchen" hidden><div id="kots" class="kots"></div></section>
+
+<section id="reports" hidden>
+  <div class="bar"><input id="rday" type="date" style="max-width:220px"></div>
+  <div id="rep"></div>
+</section>
+
+<section id="menu" hidden>
+  <form id="itemForm" class="card bar wrap">
+    <input type="hidden" name="iid">
+    <input name="iname" placeholder="Item name" required>
+    <input name="icat" placeholder="Category" list="catList">
+    <input name="iprice" type="number" step="0.01" min="0" inputmode="decimal" placeholder="Price ₹" required>
+    <button class="pri">Save item</button>
+  </form>
+  <datalist id="catList"></datalist>
+  <div class="card"><table id="itemTable"></table></div>
+</section>
+
+<section id="settings" hidden><form id="setForm" class="card form"></form></section>
+</main>
+
+<dialog id="custDlg"><form id="custForm">
+  <h2 id="custTitle"></h2>
+  <label>Customer name<input name="customer" autocomplete="off"></label>
+  <label>Phone<input name="phone" type="tel" inputmode="tel" autocomplete="off"></label>
+  <label id="addrWrap">Delivery address<textarea name="address" rows="3"></textarea></label>
+  <div class="row"><button type="button" data-close>Cancel</button><button class="pri">Start order</button></div>
+</form></dialog>
+
+<dialog id="billDlg"><form id="billForm">
+  <h2 id="billTitle">Bill</h2>
+  <div id="payBtns" class="seg"></div>
+  <label>Discount %<input id="bdisc" type="number" min="0" max="100" step="0.5" value="0" inputmode="decimal"></label>
+  <div id="bsum"></div>
+  <div class="row"><button type="button" data-close>Back</button><button class="ok">Confirm &amp; print</button></div>
+</form></dialog>
+
+<dialog id="pinDlg"><form id="pinForm">
+  <h2>Staff PIN</h2>
+  <input name="pin" type="password" inputmode="numeric" autocomplete="off" required>
+  <button class="pri">Unlock</button>
+</form></dialog>
+
+<div id="receipt"></div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const money = c => (c < 0 ? '−' : '') + '₹' + (Math.abs(c) / 100).toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+const row = (a, b, cls = '') => `<div class="row ${cls}"><span>${a}</span><span>${b}</span></div>`;
+const TYPE = {dine_in: 'Dine-in', takeaway: 'Takeaway', delivery: 'Delivery'};
+const PAYMENTS = ['Cash', 'UPI', 'Card'];
+const today = () => new Date().toLocaleDateString('en-CA');  // YYYY-MM-DD, local time
+const mins = t => Math.max(0, Math.round((Date.now() - new Date(t)) / 60000));
+
+let S = {}, items = [], orders = [], cur = null, cart = new Map(), cat = '', view = 'floor', pay = 'Cash', lastBills = [];
+let pin = ''; try { pin = localStorage.getItem('pin') || '' } catch {}
+
+// ---------- server ----------
+let pinWait = null;
+function askPin() {
+  return pinWait ||= new Promise(res => {
+    const d = $('#pinDlg'), f = $('#pinForm');
+    d.oncancel = e => e.preventDefault();
+    f.onsubmit = e => {
+      e.preventDefault(); pin = f.pin.value; f.reset();
+      try { localStorage.setItem('pin', pin) } catch {}
+      d.close(); pinWait = null; res();
+    };
+    d.showModal(); f.pin.focus();
+  });
+}
+async function api(path, body) {
+  const r = await fetch(path, {method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json', 'X-Pin': pin},
+                               body: body && JSON.stringify(body)});
+  if (r.status === 401) { await askPin(); return api(path, body); }
+  const j = await r.json();
+  if (!r.ok) { alert(j.error); throw new Error(j.error); }
+  return j;
+}
+let working = false;  // one action at a time: stops double-taps creating two KOTs/bills
+async function once(fn) { if (working) return; working = true; try { await fn() } finally { working = false } }
+
+async function load() {
+  const st = await api('/api/state');
+  S = st.settings; items = st.items; orders = st.orders;
+  $('#rname').textContent = S.name;
+  if (cur?.id) cur = orders.find(o => o.id === cur.id) || null;
+  render();
+}
+
+// ---------- views ----------
+function show(v) {
+  view = v;
+  document.querySelectorAll('main>section').forEach(s => s.hidden = s.id !== v);
+  document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.view === (v === 'order' ? 'floor' : v)));
+  if (v === 'kitchen') loadKitchen();
+  if (v === 'reports') loadReport();
+  render();
+  scrollTo(0, 0);
+}
+function render() {
+  if (view === 'floor') renderFloor();
+  if (view === 'order') renderOrder();
+  if (view === 'menu') renderItems();
+  if (view === 'settings') renderSettings();
+}
+document.querySelector('nav').onclick = e => {
+  const v = e.target.closest('button')?.dataset.view;
+  if (v && (view !== 'order' || !cart.size || confirm('Discard items not sent to kitchen?'))) { cur = null; cart.clear(); show(v) }
+};
+
+// ---------- floor ----------
+function tileInfo(o) { return o ? money(o.amount) + (o.pending ? ` · ${o.pending} cooking` : '') : 'free' }
+function renderFloor() {
+  let h = '';
+  for (let t = 1; t <= +S.tables; t++) {
+    const o = orders.find(o => o.type === 'dine_in' && o.table_no === t);
+    h += `<button class="tile ${o ? 'busy' : ''}" data-table="${t}">T${t}<small>${tileInfo(o)}</small></button>`;
+  }
+  $('#tables').innerHTML = h;
+  $('#others').innerHTML = `<button class="tile add" data-new="takeaway">+ Takeaway</button><button class="tile add" data-new="delivery">+ Delivery</button>`
+    + orders.filter(o => o.type !== 'dine_in').map(o =>
+      `<button class="tile busy" data-order="${o.id}">${TYPE[o.type]} #${o.id}<small>${esc(o.customer)}</small><small>${tileInfo(o)}</small></button>`).join('');
+}
+$('#floor').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.order) return openOrder(orders.find(o => o.id === +b.dataset.order));
+  if (b.dataset.table) {
+    const t = +b.dataset.table;
+    return openOrder(orders.find(o => o.type === 'dine_in' && o.table_no === t) || {type: 'dine_in', table_no: t, lines: [], amount: 0});
+  }
+  if (b.dataset.new) {
+    const f = $('#custForm'), dl = b.dataset.new === 'delivery';
+    f.reset(); f.dataset.type = b.dataset.new;
+    $('#custTitle').textContent = 'New ' + TYPE[b.dataset.new];
+    $('#addrWrap').hidden = !dl; f.phone.required = f.address.required = dl;
+    $('#custDlg').showModal();
+  }
+};
+$('#custForm').onsubmit = e => {
+  e.preventDefault(); const f = e.target;
+  $('#custDlg').close();
+  openOrder({type: f.dataset.type, customer: f.customer.value, phone: f.phone.value, address: f.address.value, lines: [], amount: 0});
+};
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
+
+// ---------- order ----------
+// an order without id is a draft: it's created on the server with its first KOT, so tapping a table by mistake leaves nothing behind
+function openOrder(o) { cur = o; cart.clear(); cat = ''; $('#search').value = ''; $('#note').value = ''; show('order') }
+function orderTitle(o) { return o.type === 'dine_in' ? `Table ${o.table_no}` : `${TYPE[o.type]}${o.id ? ' #' + o.id : ''}${o.customer ? ' · ' + o.customer : ''}` }
+function renderOrder() {
+  if (!cur) return show('floor');
+  $('#otitle').textContent = orderTitle(cur);
+  const cats = [...new Set(items.map(i => i.category))];
+  $('#cats').innerHTML = ['', ...cats].map(c => `<button class="${c === cat ? 'on' : ''}" data-cat="${esc(c)}">${esc(c || 'All')}</button>`).join('');
+  renderGrid(); renderTicket();
+}
+function renderGrid() {
+  const q = $('#search').value.trim().toLowerCase();
+  const list = items.filter(i => (!cat || i.category === cat) && i.name.toLowerCase().includes(q));
+  $('#grid').innerHTML = list.map(i => `<button class="item" data-id="${i.id}">${esc(i.name)}<small>${money(i.price)}</small>${cart.get(i.id) ? `<i>${cart.get(i.id)}</i>` : ''}</button>`).join('')
+    || '<p class="mute">No matching items.</p>';
+}
+function cartLines() { return [...cart].map(([id, qty]) => ({...items.find(i => i.id === id), qty})) }
+function renderTicket() {
+  const sent = cur.lines.map(l => `<tr><td>${l.qty} × ${esc(l.name)} <span class="tag ${l.kot_status}">${l.kot_status === 'ready' ? 'ready' : 'cooking'}</span></td>
+      <td class="r">${money(l.price * l.qty)}</td><td><button class="x" data-del="${l.id}" aria-label="Remove ${esc(l.name)}">✕</button></td></tr>`).join('');
+  const pending = cartLines().map(l => `<tr><td>${esc(l.name)}</td><td class="qty r"><button data-id="${l.id}" data-d="-1" aria-label="Less">−</button> ${l.qty} <button data-id="${l.id}" data-d="1" aria-label="More">+</button></td>
+      <td class="r">${money(l.price * l.qty)}</td></tr>`).join('');
+  $('#ticket').innerHTML = (sent ? `<h3>Sent to kitchen</h3><table>${sent}</table>` : '')
+    + (pending ? `<h3>New items</h3><table>${pending}</table>` : '')
+    + (!sent && !pending ? '<p class="mute">Tap menu items to add them.</p>' : '');
+  const sub = cur.amount + cartLines().reduce((a, l) => a + l.price * l.qty, 0);
+  $('#osub').textContent = money(sub);
+  $('#sendKot').disabled = !cart.size;
+  $('#billBtn').disabled = !sub;
+  $('#cancelOrder').hidden = !cur.id;
+}
+function bump(id, d) {
+  const q = (cart.get(id) || 0) + d;
+  q > 0 ? cart.set(id, q) : cart.delete(id);
+  renderGrid(); renderTicket();
+}
+$('#grid').onclick = e => { const b = e.target.closest('.item'); if (b) bump(+b.dataset.id, 1) };
+$('#cats').onclick = e => { const b = e.target.closest('button'); if (b) { cat = b.dataset.cat; renderOrder() } };
+$('#search').oninput = renderGrid;
+$('#back').onclick = () => { if (!cart.size || confirm('Discard items not sent to kitchen?')) { cur = null; cart.clear(); show('floor'); load() } };
+$('#ticket').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.d) bump(+b.dataset.id, +b.dataset.d);
+  if (b.dataset.del && confirm('Remove this item from the order?')) once(async () => { await api('/api/orders/remove_line', {line_id: +b.dataset.del}); await load() });
+};
+async function sendKot() {
+  if (!cart.size) return;
+  if (!cur.id) cur.id = (await api('/api/orders/new', cur)).id;
+  await api('/api/orders/kot', {order_id: cur.id, note: $('#note').value, lines: [...cart].map(([id, qty]) => ({id, qty}))});
+  cart.clear(); $('#note').value = '';
+  await load();
+}
+$('#sendKot').onclick = () => once(async () => { await sendKot(); cur = null; show('floor') });
+$('#cancelOrder').onclick = () => confirm('Cancel this whole order? It will show in reports as cancelled.') &&
+  once(async () => { await api('/api/orders/cancel', {order_id: cur.id}); cur = null; cart.clear(); await load(); show('floor') });
+
+// ---------- billing ----------
+function calc(lines, disc) {  // preview only - mirrors totals() in app.py, which is what actually gets billed
+  const sub = lines.reduce((a, l) => a + l.price * l.qty, 0), dis = Math.round(sub * disc / 100);
+  const g = Math.round((sub - dis) * (+S.tax_pct / 2) / 100), raw = sub - dis + 2 * g, total = Math.floor((raw + 50) / 100) * 100;
+  return {sub, dis, cgst: g, sgst: g, ro: total - raw, total};
+}
+$('#billBtn').onclick = () => once(async () => {
+  await sendKot();  // anything still in the cart goes to the kitchen first, so the bill matches what was ordered
+  if (!cur) return;
+  pay = 'Cash'; $('#bdisc').value = 0; $('#billTitle').textContent = 'Bill · ' + orderTitle(cur);
+  renderBill(); $('#billDlg').showModal();
+});
+function renderBill() {
+  $('#payBtns').innerHTML = PAYMENTS.map(p => `<button type="button" class="${p === pay ? 'on' : ''}" data-pay="${p}">${p}</button>`).join('');
+  const t = calc(cur.lines, +$('#bdisc').value || 0), h = +S.tax_pct / 2;
+  $('#bsum').innerHTML = row('Subtotal', money(t.sub)) + (t.dis ? row('Discount', '−' + money(t.dis)) : '')
+    + row(`CGST ${h}%`, money(t.cgst)) + row(`SGST ${h}%`, money(t.sgst)) + (t.ro ? row('Round off', money(t.ro)) : '')
+    + row('Total', money(t.total), 'big');
+}
+$('#payBtns').onclick = e => { const b = e.target.closest('button'); if (b) { pay = b.dataset.pay; renderBill() } };
+$('#bdisc').oninput = renderBill;
+$('#billForm').onsubmit = e => {
+  e.preventDefault();
+  once(async () => {
+    const b = await api('/api/orders/bill', {order_id: cur.id, payment: pay, discount_pct: +$('#bdisc').value || 0});
+    $('#billDlg').close(); cur = null; cart.clear();
+    printReceipt(b);
+    await load(); show('floor');
+  });
+};
+function printReceipt(b) {
+  const h = +b.tax_pct / 2, when = new Date(b.billed).toLocaleString('en-IN', {dateStyle: 'short', timeStyle: 'short'});
+  $('#receipt').innerHTML = `<div class="c"><b class="big">${esc(S.name)}</b>`
+    + (S.address ? '<br>' + esc(S.address) : '') + (S.phone ? '<br>Ph: ' + esc(S.phone) : '')
+    + (S.gstin ? '<br>GSTIN: ' + esc(S.gstin) : '') + (S.fssai ? '<br>FSSAI: ' + esc(S.fssai) : '')
+    + '<br><b>TAX INVOICE</b></div><hr>'
+    + row('Bill No: ' + b.bill_no, when) + row(TYPE[b.type] + (b.table_no ? ' · Table ' + b.table_no : ''), 'Paid: ' + esc(b.payment))
+    + (b.customer || b.phone ? `<div>${esc(b.customer)} ${esc(b.phone)}</div>` : '') + (b.address ? `<div>${esc(b.address)}</div>` : '')
+    + '<hr>' + b.lines.map(l => row(`${esc(l.name)}<br>&nbsp; ${l.qty} × ${money(l.price)}`, money(l.qty * l.price))).join('')
+    + '<hr>' + row('Subtotal', money(b.subtotal)) + (b.discount ? row(`Discount (${b.discount_pct}%)`, '−' + money(b.discount)) : '')
+    + row(`CGST @ ${h}%`, money(b.cgst)) + row(`SGST @ ${h}%`, money(b.sgst)) + (b.round_off ? row('Round off', money(b.round_off)) : '')
+    + '<hr>' + row('TOTAL', money(b.total), 'big') + `<hr><div class="c">${esc(S.footer)}</div>`;
+  setTimeout(() => window.print(), 50);
+}
+
+// ---------- kitchen ----------
+async function loadKitchen() {
+  const kots = await api('/api/kitchen');
+  if (view !== 'kitchen') return;
+  $('#kots').innerHTML = kots.map(k => `<div class="card kot ${mins(k.created) >= 15 ? 'late' : ''}">
+      <div class="row"><b style="font-size:20px">${k.type === 'dine_in' ? 'Table ' + k.table_no : TYPE[k.type] + ' #' + k.order_id}</b>
+      <span class="mute">KOT ${k.id} · ${mins(k.created)} min</span></div>
+      <ul>${k.lines.map(l => `<li><b>${l.qty}</b> × ${esc(l.name)}</li>`).join('')}</ul>
+      ${k.note ? `<div class="note">📝 ${esc(k.note)}</div>` : ''}
+      <button class="ok" data-ready="${k.id}">Mark ready</button></div>`).join('')
+    || '<p class="mute">No pending orders.</p>';
+}
+$('#kots').onclick = e => {
+  const id = e.target.closest('button')?.dataset.ready;
+  if (id) once(async () => { await api('/api/kots/ready', {id: +id}); await loadKitchen() });
+};
+
+// ---------- reports ----------
+$('#rday').value = today();
+$('#rday').onchange = loadReport;
+async function loadReport() {
+  const r = await api('/api/report?day=' + $('#rday').value), s = r.sums;
+  const tile = (l, v) => `<div class="card"><small class="mute">${l}</small><b>${v}</b></div>`;
+  const list = (title, obj, name = k => k) => `<div class="card"><h3 style="margin-top:0">${title}</h3>`
+    + (Object.entries(obj).map(([k, v]) => row(esc(name(k)), money(v))).join('') || '<p class="mute">No sales</p>') + '</div>';
+  lastBills = r.bills;
+  $('#rep').innerHTML = `<div class="stats">${tile('Net sales', money(s.total))}${tile('Bills', r.count)}
+      ${tile('GST collected', money(s.cgst + s.sgst))}${tile('Discounts given', money(s.discount))}${tile('Cancelled orders', r.cancelled)}</div>
+    <div class="cols">${list('By payment', r.by_payment)}${list('By order type', r.by_type, k => TYPE[k])}</div>
+    <div class="card"><h3 style="margin-top:0">Item-wise sales (before discount)</h3><table><tr><th>Item</th><th class="r">Qty</th><th class="r">Amount</th></tr>
+      ${r.items.map(([n, q, a]) => `<tr><td>${esc(n)}</td><td class="r">${q}</td><td class="r">${money(a)}</td></tr>`).join('')}</table></div>
+    <div class="card"><h3 style="margin-top:0">Bills</h3><table><tr><th>No</th><th>Time</th><th>Order</th><th>Paid</th><th class="r">Total</th><th></th></tr>
+      ${r.bills.map(b => `<tr><td>${b.bill_no}</td><td>${b.billed.slice(11, 16)}</td><td>${TYPE[b.type]}${b.table_no ? ' T' + b.table_no : ''}</td>
+        <td>${esc(b.payment)}</td><td class="r">${money(b.total)}</td><td class="r"><button data-reprint="${b.id}">Reprint</button></td></tr>`).join('')}</table></div>`;
+}
+$('#rep').onclick = e => { const id = e.target.closest('button')?.dataset.reprint; if (id) printReceipt(lastBills.find(b => b.id === +id)) };
+
+// ---------- menu ----------
+function renderItems() {
+  $('#catList').innerHTML = [...new Set(items.map(i => i.category))].map(c => `<option value="${esc(c)}">`).join('');
+  $('#itemTable').innerHTML = '<tr><th>Item</th><th>Category</th><th class="r">Price</th><th></th></tr>' + items.map(i =>
+    `<tr><td>${esc(i.name)}</td><td>${esc(i.category)}</td><td class="r">${money(i.price)}</td>
+     <td class="r" style="white-space:nowrap"><button data-edit="${i.id}">Edit</button> <button class="warn" data-del="${i.id}">Delete</button></td></tr>`).join('');
+}
+$('#itemTable').onclick = e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const i = items.find(x => x.id === +(b.dataset.edit || b.dataset.del)), f = $('#itemForm');
+  if (b.dataset.edit) {
+    f.iid.value = i.id; f.iname.value = i.name; f.icat.value = i.category; f.iprice.value = (i.price / 100).toFixed(2);
+    scrollTo(0, 0); f.iname.focus();
+  } else if (confirm(`Delete "${i.name}" from the menu?`)) once(async () => { await api('/api/items/delete', {id: i.id}); await load() });
+};
+$('#itemForm').onsubmit = e => {
+  e.preventDefault(); const f = e.target;
+  once(async () => { await api('/api/items', Object.fromEntries(new FormData(f))); f.reset(); f.iid.value = ''; await load() });
+};
+
+// ---------- settings ----------
+const FIELDS = [['name', 'Restaurant name'], ['address', 'Address'], ['phone', 'Phone'], ['gstin', 'GSTIN'],
+  ['fssai', 'FSSAI licence no. (required on bills)'], ['tax_pct', 'GST % (split equally into CGST + SGST)'],
+  ['tables', 'Number of dine-in tables'], ['footer', 'Receipt footer'], ['pin', 'New staff PIN, 6+ digits (blank = keep current)']];
+$('#setForm').innerHTML = FIELDS.map(([k, l]) => `<label>${l}<input name="${k}" ${k === 'pin' ? 'type="password" inputmode="numeric"' : ''} autocomplete="off"></label>`).join('')
+  + '<button class="pri">Save settings</button>';
+function renderSettings() { const f = $('#setForm'); for (const [k] of FIELDS) f.elements[k].value = k === 'pin' ? '' : S[k] ?? '' }
+$('#setForm').onsubmit = e => {
+  e.preventDefault();
+  once(async () => {
+    const d = Object.fromEntries(new FormData(e.target));
+    await api('/api/settings', d);
+    if (d.pin) { pin = d.pin; try { localStorage.setItem('pin', pin) } catch {} }
+    await load(); alert('Settings saved');
+  });
+};
+
+// ---------- live refresh: other tablets' orders and new KOTs show up within a few seconds ----------
+setInterval(() => {
+  if (document.hidden || working || document.querySelector('dialog[open]')) return;
+  if (view === 'kitchen') loadKitchen().catch(() => {});
+  if (view === 'floor') load().catch(() => {});
+}, 5000);
+
+load().then(() => show('floor'));
+</script>
+</body>
+</html>
