@@ -371,9 +371,12 @@ def selftest():
 if __name__ == "__main__":
     if sys.argv[1:] == ["test"]:
         sys.exit(selftest())
+    if not DB.parent.is_dir():  # e.g. POS_DB=/data/pos.db but no volume mounted at /data
+        sys.exit(f"Data folder {DB.parent} does not exist. On Railway: add a Volume with mount path {DB.parent}.")
     con = db()
     init(con)
     con.close()
+    print(f"Data file: {DB}", flush=True)
     print(f"POS running.\n  This PC:  http://localhost:{PORT}\n  Tablets (same Wi-Fi) - try these:")
     for ip in lan_ips():
         print(f"            http://{ip}:{PORT}")
