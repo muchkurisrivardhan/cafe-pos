@@ -13,6 +13,16 @@ One Windows PC at the counter runs the server, and staff use any iPad or Android
 All data is in `pos.db`. Copy that file somewhere safe every day.
 `menu.csv` only loads on the very first run. After that, edit the menu in the app.
 
+## Online version (Railway)
+The private GitHub repo deploys itself: every push to `main` updates the website in a couple of minutes.
+1. railway.com → **Login with GitHub** → **New Project** → **Deploy from GitHub repo** → `cafe-pos` (allow Railway access to it).
+2. Open the service → **Variables**: add `POS_DB` = `/data/pos.db` and `POS_PIN` = your 6-digit staff PIN.
+3. Right-click the service (or ⌘K) → **Add Volume** → mount path `/data`. **Without this, every update wipes all bills.**
+4. **Settings → Networking → Generate Domain**. That's your link.
+
+`POS_PIN` only sets the PIN when the site first starts. After that, change it in the app's Settings.
+Back up data: open the site → **Reports** each day, or download `pos.db` from the Railway volume.
+
 ## How it works
 | Screen | Who | What |
 |---|---|---|
