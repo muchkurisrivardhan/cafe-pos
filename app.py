@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS items(id INTEGER PRIMARY KEY, name TEXT NOT NULL, cat
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, type TEXT NOT NULL, table_no INTEGER,
     customer TEXT, phone TEXT, address TEXT, created TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'billed', 'cancelled')),
-    bill_no INTEGER UNIQUE, billed TEXT, day TEXT, payment TEXT, subtotal INTEGER, discount_pct TEXT,
+    bill_no INTEGER UNIQUE, day_no INTEGER, billed TEXT, day TEXT, payment TEXT, subtotal INTEGER, discount_pct TEXT,
     discount INTEGER, tax_pct TEXT, cgst INTEGER, sgst INTEGER, round_off INTEGER, total INTEGER);
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_order_per_table ON orders(table_no) WHERE status = 'open';
 CREATE INDEX IF NOT EXISTS orders_day ON orders(day);
@@ -53,6 +53,9 @@ def init(con):
     con.execute("PRAGMA journal_mode=WAL")  # kitchen/floor polling reads don't block billing writes
     with con:
         con.executescript(SCHEMA)
+        if "day_no" not in {r[1] for r in con.execute("PRAGMA table_info(orders)")}:
+            con.execute("ALTER TABLE orders ADD COLUMN day_no INTEGER")  # databases from before daily bill numbers
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS bill_no_per_day ON orders(day, day_no)")
         con.executemany("INSERT OR IGNORE INTO settings VALUES(?, ?)", DEFAULT_SETTINGS.items())
         # Business day: bills go to this date until staff press "Close day", so reopening the app or
         # billing after midnight never splits a day. Existing databases continue their latest billed day.
@@ -107,8 +110,16 @@ def business_day(con):
     return con.execute("SELECT value FROM settings WHERE key = 'business_day'").fetchone()[0]
 
 
+def bill_label(day, n):
+    """Printed invoice number: restarts at 1 each business day, prefixed DDMMYY so it stays unique for the
+    financial year as GST requires (e.g. 131126-1)."""
+    return f"{day[8:10]}{day[5:7]}{day[2:4]}-{n}"
+
+
 def order_out(con, r):
     o = dict(r)
+    if o.get("bill_no"):
+        o["bill_label"] = bill_label(o["day"], o["day_no"]) if o.get("day_no") else str(o["bill_no"])  # old bills
     o["lines"] = [dict(l) for l in con.execute(
         "SELECT l.id, l.name, l.price, l.qty, l.kot_id, k.status AS kot_status FROM lines l "
         "JOIN kots k ON k.id = l.kot_id WHERE l.order_id = ? ORDER BY l.id", (r["id"],))]
@@ -143,7 +154,7 @@ def kitchen(con, q):
 def report(con, q):
     day = q.get("day", [date.today().isoformat()])[0]
     bills = [order_out(con, r) for r in con.execute(
-        "SELECT * FROM orders WHERE status = 'billed' AND day = ? ORDER BY bill_no DESC", (day,))]
+        "SELECT * FROM orders WHERE status = 'billed' AND day = ? ORDER BY COALESCE(day_no, bill_no) DESC", (day,))]
     pay, typ, items = {}, {}, {}
     for b in bills:
         pay[b["payment"]] = pay.get(b["payment"], 0) + b["total"]
@@ -264,16 +275,18 @@ def bill_order(con, d):
         raise ValueError("order has no items")
     tax_pct, disc = settings(con)["tax_pct"], check_pct(d.get("discount_pct"))
     sub, dis, cgst, sgst, ro, total = totals(lines, disc, tax_pct)
-    t = now()
-    # bill_no assigned inside the UPDATE so two tablets billing at once can't get the same number
+    t, day = now(), business_day(con)
+    # numbers assigned inside the UPDATE so two tablets billing at once can't get the same one;
+    # bill_no = lifetime sequence (internal), day_no = 1, 2, 3... restarting every business day
     if not con.execute(
             "UPDATE orders SET status = 'billed', bill_no = (SELECT COALESCE(MAX(bill_no), 0) + 1 FROM orders), "
+            "day_no = (SELECT COALESCE(MAX(day_no), 0) + 1 FROM orders WHERE day = ?), "
             "billed = ?, day = ?, payment = ?, subtotal = ?, discount_pct = ?, discount = ?, tax_pct = ?, "
             "cgst = ?, sgst = ?, round_off = ?, total = ? WHERE id = ? AND status = 'open'",
-            (t, business_day(con), payment, sub, disc, dis, tax_pct, cgst, sgst, ro, total, oid)).rowcount:
+            (day, t, day, payment, sub, disc, dis, tax_pct, cgst, sgst, ro, total, oid)).rowcount:
         raise ValueError("order is not open")
     b = get_order(con, oid)
-    log.info("BILL #%s: %s paid by %s (order #%s)", b["bill_no"], rs(total), payment, oid)
+    log.info("BILL %s: %s paid by %s (order #%s)", b["bill_label"], rs(total), payment, oid)
     return b
 
 
@@ -408,6 +421,7 @@ def selftest():
         assert k["lines"] == [{"name": "Paneer Tikka", "qty": 2}] and k["note"] == "less spicy"
         b = bill_order(con, {"order_id": oid, "payment": "UPI", "discount_pct": 0})
         assert (b["bill_no"], b["subtotal"], b["cgst"], b["round_off"], b["total"]) == (1, 49900, 1248, 4, 52400)
+        assert b["day_no"] == 1 and b["bill_label"] == bill_label(b["day"], 1)
         try:
             bill_order(con, {"order_id": oid, "payment": "UPI"})
             raise AssertionError("billed twice")
@@ -423,9 +437,12 @@ def selftest():
             raise AssertionError("closed a day with an open order")
         except ValueError:
             pass
+        send_kot(con, {"order_id": o2, "lines": [{"id": pid, "qty": 1}]})
+        assert bill_order(con, {"order_id": o2, "payment": "Cash"})["day_no"] == 2  # same day -> 2
+        o2 = new_order(con, {"type": "takeaway"})["id"]
         cancel_order(con, {"order_id": o2})
         closed = close_day(con, {"day": b["day"]})
-        assert closed["report"]["count"] == 1 and closed["report"]["cancelled"] == 1
+        assert closed["report"]["count"] == 2 and closed["report"]["cancelled"] == 1
         assert business_day(con) == closed["next"] == (date.today() + timedelta(days=1)).isoformat()
         try:
             close_day(con, {"day": b["day"]})  # second tablet pressing Close on the same day
@@ -433,6 +450,10 @@ def selftest():
         except ValueError:
             pass
         assert not report(con, {"day": [b["day"]]})["open"]
+        o3 = new_order(con, {"type": "takeaway"})["id"]  # next business day: numbering starts again at 1
+        send_kot(con, {"order_id": o3, "lines": [{"id": pid, "qty": 1}]})
+        b3 = bill_order(con, {"order_id": o3, "payment": "Cash"})
+        assert (b3["day_no"], b3["bill_no"]) == (1, 3) and b3["bill_label"] != b["bill_label"]
     snap = sqlite3.connect(":memory:")
     snap.deserialize(backup(con, {}))
     assert snap.execute("SELECT total FROM orders WHERE status = 'billed'").fetchone()[0] == 52400  # backup holds the bill

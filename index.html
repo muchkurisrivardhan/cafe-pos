@@ -182,6 +182,13 @@ dialog form{display:grid;gap:12px}
   <button class="pri">Unlock</button>
 </form></dialog>
 
+<dialog id="confirmDlg"><form id="confirmForm">
+  <h2>Enter staff PIN</h2>
+  <p id="confirmMsg" style="margin:0;white-space:pre-line"></p>
+  <input name="pin" type="password" inputmode="numeric" autocomplete="off" required>
+  <div class="row"><button type="button" data-close>Cancel</button><button class="pri">Confirm</button></div>
+</form></dialog>
+
 <div id="receipt"></div>
 
 <script>
@@ -211,13 +218,29 @@ function askPin() {
     d.showModal(); f.pin.focus();
   });
 }
-async function api(path, body) {
-  const r = await fetch(path, {method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json', 'X-Pin': pin},
+async function api(path, body, typedPin) {
+  const r = await fetch(path, {method: body ? 'POST' : 'GET', headers: {'Content-Type': 'application/json', 'X-Pin': typedPin ?? pin},
                                body: body && JSON.stringify(body)});
+  if (r.status === 401 && typedPin !== undefined) { alert('Wrong PIN - nothing was changed.'); throw new Error('wrong PIN') }
   if (r.status === 401) { await askPin(); return api(path, body); }
   const j = await r.json();
   if (!r.ok) { alert(j.error); throw new Error(j.error); }
   return j;
+}
+// Menu, Settings and Close day re-ask for the PIN (the server checks it) so a stray tap can't change them.
+function askConfirmPin(msg) {
+  return new Promise(res => {
+    const d = $('#confirmDlg'), f = $('#confirmForm');
+    $('#confirmMsg').textContent = msg;
+    f.reset();
+    f.onsubmit = e => { e.preventDefault(); const p = f.pin.value; d.close(); res(p) };
+    d.onclose = () => res(null);  // Cancel / Esc; ignored if onsubmit already resolved
+    d.showModal(); f.pin.focus();
+  });
+}
+async function guarded(msg, path, body) {
+  const typed = await askConfirmPin(msg);
+  return typed === null ? null : api(path, body, typed);
 }
 let working = false;  // one action at a time: stops double-taps creating two KOTs/bills
 async function once(fn) { if (working) return; working = true; try { await fn() } finally { working = false } }
@@ -382,7 +405,7 @@ function printReceipt(b) {
     + (S.address ? '<br>' + esc(S.address) : '') + (S.phone ? '<br>Ph: ' + esc(S.phone) : '')
     + (S.gstin ? '<br>GSTIN: ' + esc(S.gstin) : '') + (S.fssai ? '<br>FSSAI: ' + esc(S.fssai) : '')
     + '<br><b>TAX INVOICE</b></div><hr>'
-    + row('Bill No: ' + b.bill_no, when) + row(TYPE[b.type] + (b.table_no ? ' · Table ' + b.table_no : ''), 'Paid: ' + esc(b.payment))
+    + row('Bill No: ' + esc(b.bill_label), when) + row(TYPE[b.type] + (b.table_no ? ' · Table ' + b.table_no : ''), 'Paid: ' + esc(b.payment))
     + (b.customer || b.phone ? `<div>${esc(b.customer)} ${esc(b.phone)}</div>` : '') + (b.address ? `<div>${esc(b.address)}</div>` : '')
     + '<hr>' + b.lines.map(l => row(`${esc(l.name)}<br>&nbsp; ${l.qty} × ${money(l.price)}`, money(l.qty * l.price))).join('')
     + '<hr>' + row('Subtotal', money(b.subtotal)) + (b.discount ? row(`Discount (${b.discount_pct}%)`, '−' + money(b.discount)) : '')
@@ -428,16 +451,17 @@ async function loadReport() {
     <div class="card"><h3 style="margin-top:0">Item-wise sales (before discount)</h3><table><tr><th>Item</th><th class="r">Qty</th><th class="r">Amount</th></tr>
       ${r.items.map(([n, q, a]) => `<tr><td>${esc(n)}</td><td class="r">${q}</td><td class="r">${money(a)}</td></tr>`).join('')}</table></div>
     <div class="card"><h3 style="margin-top:0">Bills</h3><table><tr><th>No</th><th>Time</th><th>Order</th><th>Paid</th><th class="r">Total</th><th></th></tr>
-      ${r.bills.map(b => `<tr><td>${b.bill_no}</td><td>${b.billed.slice(11, 16)}</td><td>${TYPE[b.type]}${b.table_no ? ' T' + b.table_no : ''}</td>
+      ${r.bills.map(b => `<tr><td>${b.day_no ?? b.bill_no}</td><td>${b.billed.slice(11, 16)}</td><td>${TYPE[b.type]}${b.table_no ? ' T' + b.table_no : ''}</td>
         <td>${esc(b.payment)}</td><td class="r">${money(b.total)}</td><td class="r"><button data-reprint="${b.id}">Reprint</button></td></tr>`).join('')}</table></div>`;
 }
 $('#rep').onclick = e => { const id = e.target.closest('button')?.dataset.reprint; if (id) printReceipt(lastBills.find(b => b.id === +id)) };
 $('#dayBtn').onclick = () => {
   const r = lastReport; if (!r) return;
   if (!r.open) return printDayReport(r);
-  if (!confirm(`Close ${fmtDay(r.day)}?\n\n${r.count} bills, net ${money(r.sums.total)}.\nThe daily report will print, and new bills will go to the next day.`)) return;
   once(async () => {
-    const res = await api('/api/day/close', {day: r.day});
+    const res = await guarded(`Close ${fmtDay(r.day)}?\n${r.count} bills, net ${money(r.sums.total)}.\nThe daily report will print and new bills will go to the next day.`,
+                              '/api/day/close', {day: r.day});
+    if (!res) return;
     printDayReport(res.report);
     await load();
     $('#rday').value = S.business_day;
@@ -472,11 +496,16 @@ $('#itemTable').onclick = e => {
   if (b.dataset.edit) {
     f.iid.value = i.id; f.iname.value = i.name; f.icat.value = i.category; f.iprice.value = (i.price / 100).toFixed(2);
     scrollTo(0, 0); f.iname.focus();
-  } else if (confirm(`Delete "${i.name}" from the menu?`)) once(async () => { await api('/api/items/delete', {id: i.id}); await load() });
+  } else once(async () => {
+    if (await guarded(`Delete "${i.name}" from the menu?`, '/api/items/delete', {id: i.id})) await load();
+  });
 };
 $('#itemForm').onsubmit = e => {
-  e.preventDefault(); const f = e.target;
-  once(async () => { await api('/api/items', Object.fromEntries(new FormData(f))); f.reset(); f.iid.value = ''; await load() });
+  e.preventDefault(); const f = e.target, d = Object.fromEntries(new FormData(f));
+  once(async () => {
+    if (!await guarded(`${d.iid ? 'Change' : 'Add'} "${d.iname}" at ₹${d.iprice}?`, '/api/items', d)) return;
+    f.reset(); f.iid.value = ''; await load();
+  });
 };
 
 // ---------- settings ----------
@@ -496,7 +525,7 @@ $('#setForm').onsubmit = e => {
   e.preventDefault();
   once(async () => {
     const d = Object.fromEntries(new FormData(e.target));
-    await api('/api/settings', d);
+    if (!await guarded('Save these settings?' + (d.pin ? '\nThis also changes the staff PIN (type the current one).' : ''), '/api/settings', d)) return;
     if (d.pin) { pin = d.pin; try { localStorage.setItem('pin', pin) } catch {} }
     await load(); alert('Settings saved');
   });
