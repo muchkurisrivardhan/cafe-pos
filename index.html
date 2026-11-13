@@ -110,6 +110,7 @@ dialog form{display:grid;gap:12px}
 
 <main>
 <section id="floor">
+  <div id="dayBanner" class="card" style="background:var(--busy);border:1px solid var(--busyb)" hidden></div>
   <h3>Dine-in</h3>
   <div id="tables" class="tiles"></div>
   <h3>Takeaway &amp; Delivery</h3>
@@ -139,7 +140,8 @@ dialog form{display:grid;gap:12px}
 <section id="kitchen" hidden><div id="kots" class="kots"></div></section>
 
 <section id="reports" hidden>
-  <div class="bar"><input id="rday" type="date" style="max-width:220px"></div>
+  <div class="bar wrap"><input id="rday" type="date" style="max-width:220px"><span id="dayTag" class="tag"></span>
+    <span style="flex:1"></span><button id="dayBtn" class="pri"></button></div>
   <div id="rep"></div>
 </section>
 
@@ -234,7 +236,7 @@ function show(v) {
   document.querySelectorAll('main>section').forEach(s => s.hidden = s.id !== v);
   document.querySelectorAll('nav button').forEach(b => b.classList.toggle('on', b.dataset.view === (v === 'order' ? 'floor' : v)));
   if (v === 'kitchen') loadKitchen();
-  if (v === 'reports') loadReport();
+  if (v === 'reports') { $('#rday').value = S.business_day; loadReport() }
   render();
   scrollTo(0, 0);
 }
@@ -258,6 +260,9 @@ function renderFloor() {
     h += `<button class="tile ${o ? 'busy' : ''}" data-table="${t}">T${t}<small>${tileInfo(o)}</small></button>`;
   }
   $('#tables').innerHTML = h;
+  // business day only moves on "Close day", so remind staff if yesterday was never closed
+  $('#dayBanner').hidden = !(S.business_day < today());
+  $('#dayBanner').innerHTML = `Bills are still going to <b>${fmtDay(S.business_day)}</b>. When you finish for that day, go to <b>Reports → Close day</b>.`;
   $('#others').innerHTML = `<button class="tile add" data-new="takeaway">+ Takeaway</button><button class="tile add" data-new="delivery">+ Delivery</button>`
     + orders.filter(o => o.type !== 'dine_in').map(o =>
       `<button class="tile busy" data-order="${o.id}">${TYPE[o.type]} #${o.id}<small>${esc(o.customer)}</small><small>${tileInfo(o)}</small></button>`).join('');
@@ -404,10 +409,15 @@ $('#kots').onclick = e => {
 };
 
 // ---------- reports ----------
-$('#rday').value = today();
+const fmtDay = d => new Date(d + 'T00:00').toLocaleDateString('en-IN', {weekday: 'short', day: 'numeric', month: 'short', year: 'numeric'});
+let lastReport = null;
 $('#rday').onchange = loadReport;
 async function loadReport() {
   const r = await api('/api/report?day=' + $('#rday').value), s = r.sums;
+  lastReport = r;
+  $('#dayTag').className = 'tag ' + (r.open ? '' : 'ready');
+  $('#dayTag').textContent = r.open ? 'Open - bills are going to this day' : 'Closed';
+  $('#dayBtn').textContent = r.open ? 'Close day & print report' : 'Print day report';
   const tile = (l, v) => `<div class="card"><small class="mute">${l}</small><b>${v}</b></div>`;
   const list = (title, obj, name = k => k) => `<div class="card"><h3 style="margin-top:0">${title}</h3>`
     + (Object.entries(obj).map(([k, v]) => row(esc(name(k)), money(v))).join('') || '<p class="mute">No sales</p>') + '</div>';
@@ -422,6 +432,32 @@ async function loadReport() {
         <td>${esc(b.payment)}</td><td class="r">${money(b.total)}</td><td class="r"><button data-reprint="${b.id}">Reprint</button></td></tr>`).join('')}</table></div>`;
 }
 $('#rep').onclick = e => { const id = e.target.closest('button')?.dataset.reprint; if (id) printReceipt(lastBills.find(b => b.id === +id)) };
+$('#dayBtn').onclick = () => {
+  const r = lastReport; if (!r) return;
+  if (!r.open) return printDayReport(r);
+  if (!confirm(`Close ${fmtDay(r.day)}?\n\n${r.count} bills, net ${money(r.sums.total)}.\nThe daily report will print, and new bills will go to the next day.`)) return;
+  once(async () => {
+    const res = await api('/api/day/close', {day: r.day});
+    printDayReport(res.report);
+    await load();
+    $('#rday').value = S.business_day;
+    await loadReport();
+  });
+};
+function printDayReport(r) {  // 80 mm end-of-day report (Z report)
+  const s = r.sums, h = +S.tax_pct / 2;
+  $('#receipt').innerHTML = `<div class="c"><b class="big">${esc(S.name)}</b><br><b>DAILY SALES REPORT</b><br>${fmtDay(r.day)}`
+    + `<br>${r.open ? 'Day still open' : 'Day closed'} · printed ${new Date().toLocaleString('en-IN', {dateStyle: 'short', timeStyle: 'short'})}</div><hr>`
+    + row('Bills', r.count) + row('Cancelled orders', r.cancelled) + '<hr>'
+    + row('Gross (before discount)', money(s.subtotal)) + row('Discounts', '−' + money(s.discount))
+    + row(`CGST @ ${h}%`, money(s.cgst)) + row(`SGST @ ${h}%`, money(s.sgst)) + row('Round off', money(s.round_off))
+    + '<hr>' + row('NET SALES', money(s.total), 'big') + '<hr><b>By payment</b>'
+    + (Object.entries(r.by_payment).map(([k, v]) => row(esc(k), money(v))).join('') || '<div>-</div>')
+    + '<hr><b>By order type</b>' + (Object.entries(r.by_type).map(([k, v]) => row(TYPE[k], money(v))).join('') || '<div>-</div>')
+    + '<hr><b>Items sold</b>' + (r.items.map(([n, q, a]) => row(`${q} × ${esc(n)}`, money(a))).join('') || '<div>-</div>')
+    + '<hr><div class="c">--- end of report ---</div>';
+  setTimeout(() => window.print(), 50);
+}
 
 // ---------- menu ----------
 function renderItems() {

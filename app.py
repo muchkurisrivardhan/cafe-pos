@@ -2,7 +2,7 @@
 Run: python app.py      Self-check: python app.py test      Windows control window: python gui.py
 Only needs Python 3 - no packages. All data lives in pos.db: back it up."""
 import csv, hmac, json, logging, os, socket, sqlite3, sys, time, webbrowser
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -54,6 +54,10 @@ def init(con):
     with con:
         con.executescript(SCHEMA)
         con.executemany("INSERT OR IGNORE INTO settings VALUES(?, ?)", DEFAULT_SETTINGS.items())
+        # Business day: bills go to this date until staff press "Close day", so reopening the app or
+        # billing after midnight never splits a day. Existing databases continue their latest billed day.
+        con.execute("INSERT OR IGNORE INTO settings VALUES('business_day', "
+                    "COALESCE((SELECT MAX(day) FROM orders WHERE status = 'billed'), ?))", (date.today().isoformat(),))
         if not con.execute("SELECT 1 FROM items").fetchone():  # first run: load the starter menu
             with open(RES / "menu.csv", encoding="utf-8") as f:
                 con.executemany("INSERT INTO items(category, name, price) VALUES(?, ?, ?)",
@@ -97,6 +101,10 @@ def check_pct(v):
 
 def settings(con):
     return {r["key"]: r["value"] for r in con.execute("SELECT * FROM settings")}
+
+
+def business_day(con):
+    return con.execute("SELECT value FROM settings WHERE key = 'business_day'").fetchone()[0]
 
 
 def order_out(con, r):
@@ -143,12 +151,12 @@ def report(con, q):
         for l in b["lines"]:
             qty, amt = items.get(l["name"], (0, 0))
             items[l["name"]] = (qty + l["qty"], amt + l["qty"] * l["price"])
-    return {"day": day, "count": len(bills),
+    return {"day": day, "open": day == business_day(con), "count": len(bills),
             "sums": {k: sum(b[k] for b in bills) for k in ("subtotal", "discount", "cgst", "sgst", "round_off", "total")},
             "by_payment": pay, "by_type": typ,
             "items": sorted(([n, q, a] for n, (q, a) in items.items()), key=lambda x: -x[2]),
-            "cancelled": con.execute("SELECT COUNT(*) FROM orders WHERE status = 'cancelled' AND substr(created, 1, 10) = ?",
-                                     (day,)).fetchone()[0],
+            "cancelled": con.execute("SELECT COUNT(*) FROM orders WHERE status = 'cancelled' "
+                                     "AND COALESCE(day, substr(created, 1, 10)) = ?", (day,)).fetchone()[0],
             "bills": bills}
 
 
@@ -234,8 +242,8 @@ def remove_line(con, d):
 
 
 def cancel_order(con, d):
-    if not con.execute("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'open'",
-                       (int(d["order_id"]),)).rowcount:
+    if not con.execute("UPDATE orders SET status = 'cancelled', day = ? WHERE id = ? AND status = 'open'",
+                       (business_day(con), int(d["order_id"]))).rowcount:
         raise ValueError("order is not open")
     log.warning("Order #%s CANCELLED", d["order_id"])
     return {"ok": True}
@@ -262,11 +270,28 @@ def bill_order(con, d):
             "UPDATE orders SET status = 'billed', bill_no = (SELECT COALESCE(MAX(bill_no), 0) + 1 FROM orders), "
             "billed = ?, day = ?, payment = ?, subtotal = ?, discount_pct = ?, discount = ?, tax_pct = ?, "
             "cgst = ?, sgst = ?, round_off = ?, total = ? WHERE id = ? AND status = 'open'",
-            (t, t[:10], payment, sub, disc, dis, tax_pct, cgst, sgst, ro, total, oid)).rowcount:
+            (t, business_day(con), payment, sub, disc, dis, tax_pct, cgst, sgst, ro, total, oid)).rowcount:
         raise ValueError("order is not open")
     b = get_order(con, oid)
     log.info("BILL #%s: %s paid by %s (order #%s)", b["bill_no"], rs(total), payment, oid)
     return b
+
+
+def close_day(con, d):
+    """End-of-day: lock in the daily report and move billing to the next business day."""
+    day = business_day(con)
+    if d.get("day") != day:
+        raise ValueError("this day is already closed - refresh the page")
+    still_open = con.execute("SELECT COUNT(*) FROM orders WHERE status = 'open'").fetchone()[0]
+    if still_open:
+        raise ValueError(f"{still_open} order(s) still open - bill or cancel them before closing the day")
+    nxt = max(date.fromisoformat(day) + timedelta(days=1), date.today()).isoformat()  # forgot to close? skip to today
+    # conditional UPDATE: if two tablets press Close at once, only one wins
+    if not con.execute("UPDATE settings SET value = ? WHERE key = 'business_day' AND value = ?", (nxt, day)).rowcount:
+        raise ValueError("this day is already closed - refresh the page")
+    r = report(con, {"day": [day]})
+    log.info("DAY CLOSED %s: %d bills, net %s. Next business day: %s", day, r["count"], rs(r["sums"]["total"]), nxt)
+    return {"report": r, "next": nxt}
 
 
 def backup(con, q):
@@ -282,7 +307,8 @@ def backup(con, q):
 GET = {"/api/state": state, "/api/kitchen": kitchen, "/api/report": report, "/api/backup": backup}
 POST = {"/api/items": save_item, "/api/items/delete": delete_item, "/api/settings": save_settings,
         "/api/orders/new": new_order, "/api/orders/kot": send_kot, "/api/orders/remove_line": remove_line,
-        "/api/orders/cancel": cancel_order, "/api/orders/bill": bill_order, "/api/kots/ready": kot_ready}
+        "/api/orders/cancel": cancel_order, "/api/orders/bill": bill_order, "/api/kots/ready": kot_ready,
+        "/api/day/close": close_day}
 
 
 # ponytail: one global lockout, so guessing a 6-digit PIN online takes months; an attacker can also keep
@@ -387,9 +413,26 @@ def selftest():
             raise AssertionError("billed twice")
         except ValueError:
             pass
-        new_order(con, {"type": "dine_in", "table_no": 1})  # table is free again after billing
+        assert b["day"] == business_day(con) == date.today().isoformat()
+        o2 = new_order(con, {"type": "dine_in", "table_no": 1})["id"]  # table is free again after billing
         r = report(con, {"day": [b["day"]]})
         assert r["count"] == 1 and r["by_payment"] == {"UPI": 52400} and r["items"] == [["Paneer Tikka", 2, 49900]]
+        assert r["open"]
+        try:
+            close_day(con, {"day": b["day"]})
+            raise AssertionError("closed a day with an open order")
+        except ValueError:
+            pass
+        cancel_order(con, {"order_id": o2})
+        closed = close_day(con, {"day": b["day"]})
+        assert closed["report"]["count"] == 1 and closed["report"]["cancelled"] == 1
+        assert business_day(con) == closed["next"] == (date.today() + timedelta(days=1)).isoformat()
+        try:
+            close_day(con, {"day": b["day"]})  # second tablet pressing Close on the same day
+            raise AssertionError("closed the same day twice")
+        except ValueError:
+            pass
+        assert not report(con, {"day": [b["day"]]})["open"]
     snap = sqlite3.connect(":memory:")
     snap.deserialize(backup(con, {}))
     assert snap.execute("SELECT total FROM orders WHERE status = 'billed'").fetchone()[0] == 52400  # backup holds the bill

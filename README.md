@@ -42,6 +42,7 @@ Back up data: in the app, **Settings → Download backup of all data**, at least
 | Tables | Waiters / counter | Tap a table (or + Takeaway / + Delivery), tap items, add a kitchen note, then **Send to kitchen**. |
 | Kitchen | Kitchen tablet | Live list of KOTs (refreshes every 5 s). A ticket turns red after 15 min. Tap **Mark ready**. |
 | Bill & print | Counter | Pick Cash / UPI / Card, set an optional discount %, and print. GST is split into CGST + SGST and the total is rounded to the nearest ₹1. |
+| Close day | Owner, at closing time | Reports → **Close day & print report**. Bills keep going to the same business day (even after midnight or after restarting the app) until you press this. It prints the daily report and moves billing to the next day. It's blocked while any order is still open. |
 | Reports | Owner | For any date: net sales, GST, discounts, cancelled orders, totals by payment and by order type, item-wise sales, and bill reprints. |
 
 Printing uses the tablet's normal print dialog: AirPrint on iPad, the print service on Android.
