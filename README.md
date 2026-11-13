@@ -21,7 +21,7 @@ The private GitHub repo deploys itself: every push to `main` updates the website
 4. **Settings → Networking → Generate Domain**. That's your link.
 
 `POS_PIN` only sets the PIN when the site first starts. After that, change it in the app's Settings.
-Back up data: open the site → **Reports** each day, or download `pos.db` from the Railway volume.
+Back up data: in the app, **Settings → Download backup of all data**, at least weekly. To restore one, rename it `pos.db` and run the app from it.
 
 ## How it works
 | Screen | Who | What |

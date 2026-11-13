@@ -250,7 +250,16 @@ def bill_order(con, d):
     return get_order(con, oid)
 
 
-GET = {"/api/state": state, "/api/kitchen": kitchen, "/api/report": report}
+def backup(con, q):
+    """Consistent snapshot of the whole database, safe to take while the café is billing."""
+    snap = sqlite3.connect(":memory:")
+    con.backup(snap)
+    data = snap.serialize()
+    snap.close()
+    return data
+
+
+GET = {"/api/state": state, "/api/kitchen": kitchen, "/api/report": report, "/api/backup": backup}
 POST = {"/api/items": save_item, "/api/items/delete": delete_item, "/api/settings": save_settings,
         "/api/orders/new": new_order, "/api/orders/kot": send_kot, "/api/orders/remove_line": remove_line,
         "/api/orders/cancel": cancel_order, "/api/orders/bill": bill_order, "/api/kots/ready": kot_ready}
@@ -271,6 +280,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if ctype == "application/octet-stream":
+            self.send_header("Content-Disposition", f'attachment; filename="pos-backup-{date.today()}.db"')
         self.end_headers()
         self.wfile.write(body)
 
@@ -303,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
             LOCK["fails"] = 0
             with con:  # one transaction per request, rolled back on any error
                 out = route(con, arg)
-            self.send(out)
+            self.send(out, ctype="application/octet-stream" if isinstance(out, bytes) else "application/json")
         except sqlite3.IntegrityError:
             self.send({"error": "That table already has an open order. Refresh and try again."}, 409)
         except (ValueError, KeyError, TypeError, InvalidOperation) as e:
@@ -351,6 +362,9 @@ def selftest():
         new_order(con, {"type": "dine_in", "table_no": 1})  # table is free again after billing
         r = report(con, {"day": [b["day"]]})
         assert r["count"] == 1 and r["by_payment"] == {"UPI": 52400} and r["items"] == [["Paneer Tikka", 2, 49900]]
+    snap = sqlite3.connect(":memory:")
+    snap.deserialize(backup(con, {}))
+    assert snap.execute("SELECT total FROM orders WHERE status = 'billed'").fetchone()[0] == 52400  # backup holds the bill
     print("ok")
 
 

@@ -448,7 +448,13 @@ const FIELDS = [['name', 'Restaurant name'], ['address', 'Address'], ['phone', '
   ['fssai', 'FSSAI licence no. (required on bills)'], ['tax_pct', 'GST % (split equally into CGST + SGST)'],
   ['tables', 'Number of dine-in tables'], ['footer', 'Receipt footer'], ['pin', 'New staff PIN, 6+ digits (blank = keep current)']];
 $('#setForm').innerHTML = FIELDS.map(([k, l]) => `<label>${l}<input name="${k}" ${k === 'pin' ? 'type="password" inputmode="numeric"' : ''} autocomplete="off"></label>`).join('')
-  + '<button class="pri">Save settings</button>';
+  + '<button class="pri">Save settings</button><button type="button" id="backupBtn">Download backup of all data</button>';
+$('#backupBtn').onclick = () => once(async () => {
+  const r = await fetch('/api/backup', {headers: {'X-Pin': pin}});
+  if (!r.ok) return alert('Backup failed - check the PIN and try again.');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(await r.blob()); a.download = `pos-backup-${today()}.db`; a.click();
+});
 function renderSettings() { const f = $('#setForm'); for (const [k] of FIELDS) f.elements[k].value = k === 'pin' ? '' : S[k] ?? '' }
 $('#setForm').onsubmit = e => {
   e.preventDefault();
