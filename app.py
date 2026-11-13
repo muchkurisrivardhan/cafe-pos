@@ -84,11 +84,11 @@ def pct(amount, p):
     return int((Decimal(amount) * Decimal(str(p)) / 100).quantize(Decimal(1), ROUND_HALF_UP))
 
 
-def totals(lines, discount_pct, tax_pct):
-    """lines: [(price, qty)]. GST on the discounted amount, split equally into CGST + SGST,
-    grand total rounded to the nearest rupee."""
+def totals(lines, discount_pct, tax_pct, discount_amt=0):
+    """lines: [(price, qty)]. Discount is a % or a flat amount in paise. GST on the discounted amount,
+    split equally into CGST + SGST, grand total rounded to the nearest rupee."""
     subtotal = sum(p * q for p, q in lines)
-    discount = pct(subtotal, discount_pct)
+    discount = discount_amt or pct(subtotal, discount_pct)
     cgst = sgst = pct(subtotal - discount, Decimal(str(tax_pct)) / 2)
     raw = subtotal - discount + cgst + sgst
     total = (raw + 50) // 100 * 100
@@ -229,9 +229,17 @@ def send_kot(con, d):
     lines = []
     for l in d.get("lines") or []:
         qty = int(l["qty"])
+        if not 1 <= qty <= 999:
+            raise ValueError("invalid quantity")
+        if l.get("id") is None:  # custom item typed at the counter: billed and printed, never added to the menu
+            name, price = str(l.get("name") or "").strip()[:60], paise(l["price"])
+            if not name or price < 0:
+                raise ValueError("custom item needs a name and a price")
+            lines.append((None, name, price, qty))
+            continue
         r = con.execute("SELECT id, name, price FROM items WHERE id = ? AND active = 1", (int(l["id"]),)).fetchone()
-        if not r or not 1 <= qty <= 999:
-            raise ValueError("invalid item or quantity")
+        if not r:
+            raise ValueError("invalid item")
         lines.append((r["id"], r["name"], r["price"], qty))
     if not lines:
         raise ValueError("no items")
@@ -239,7 +247,8 @@ def send_kot(con, d):
                       (oid, now(), str(d.get("note") or "").strip()[:200])).lastrowid
     con.executemany("INSERT INTO lines(order_id, kot_id, item_id, name, price, qty) VALUES(?, ?, ?, ?, ?, ?)",
                     [(oid, kid, *l) for l in lines])
-    log.info("KOT %s -> kitchen for order #%s: %s", kid, oid, ", ".join(f"{q}x {n}" for _, n, _, q in lines))
+    log.info("KOT %s -> kitchen for order #%s: %s", kid, oid,
+             ", ".join(f"{q}x {n}" + ("" if i else f" (custom, {rs(p)})") for i, n, p, q in lines))
     return {"id": kid}
 
 
@@ -274,7 +283,12 @@ def bill_order(con, d):
     if not lines:
         raise ValueError("order has no items")
     tax_pct, disc = settings(con)["tax_pct"], check_pct(d.get("discount_pct"))
-    sub, dis, cgst, sgst, ro, total = totals(lines, disc, tax_pct)
+    amt = paise(d.get("discount_amt") or 0)  # flat ₹ discount; when used, discount_pct stays "0"
+    if amt:
+        disc = "0"
+        if not 0 < amt <= sum(p * q for p, q in lines):
+            raise ValueError("rupee discount must be more than 0 and not more than the bill")
+    sub, dis, cgst, sgst, ro, total = totals(lines, disc, tax_pct, amt)
     t, day = now(), business_day(con)
     # numbers assigned inside the UPDATE so two tablets billing at once can't get the same one;
     # bill_no = lifetime sequence (internal), day_no = 1, 2, 3... restarting every business day
@@ -402,6 +416,7 @@ def selftest():
     assert totals(two, 10, 5) == (24550, 2455, 552, 552, 1, 23200)    # GST on discounted amount
     assert totals(two, 0, 18) == (24550, 0, 2210, 2210, 30, 29000)
     assert totals([(4949, 1)], 0, 0) == (4949, 0, 0, 0, -49, 4900)    # rounds down too
+    assert totals(two, 0, 5, 5000) == (24550, 5000, 489, 489, -28, 20500)  # flat ₹50 off, GST on the rest
     assert paise("249.50") == 24950 and paise("0.005") == 1
 
     con = db(":memory:")
@@ -437,8 +452,18 @@ def selftest():
             raise AssertionError("closed a day with an open order")
         except ValueError:
             pass
-        send_kot(con, {"order_id": o2, "lines": [{"id": pid, "qty": 1}]})
-        assert bill_order(con, {"order_id": o2, "payment": "Cash"})["day_no"] == 2  # same day -> 2
+        items_before = con.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+        send_kot(con, {"order_id": o2, "lines": [{"id": pid, "qty": 1}, {"name": "Birthday Cake", "price": "350", "qty": 1}]})
+        assert con.execute("SELECT COUNT(*) FROM items").fetchone()[0] == items_before  # custom item not added to menu
+        try:
+            bill_order(con, {"order_id": o2, "payment": "Cash", "discount_amt": "1000"})  # more than the bill
+            raise AssertionError("discount bigger than the bill")
+        except ValueError:
+            pass
+        b2 = bill_order(con, {"order_id": o2, "payment": "Cash", "discount_amt": "50"})
+        assert b2["day_no"] == 2  # same day -> 2
+        assert [l["name"] for l in b2["lines"]] == ["Paneer Tikka", "Birthday Cake"]
+        assert (b2["subtotal"], b2["discount"], b2["discount_pct"]) == (24950 + 35000, 5000, "0")
         o2 = new_order(con, {"type": "takeaway"})["id"]
         cancel_order(con, {"order_id": o2})
         closed = close_day(con, {"day": b["day"]})

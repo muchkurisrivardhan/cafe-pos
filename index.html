@@ -119,7 +119,7 @@ dialog form{display:grid;gap:12px}
 
 <section id="order" hidden>
   <div>
-    <div class="bar"><button id="back">‹ Tables</button><input id="search" type="search" placeholder="Search menu" autocomplete="off"></div>
+    <div class="bar"><button id="back">‹ Tables</button><input id="search" type="search" placeholder="Search menu" autocomplete="off"><button id="customBtn">+ Custom item</button></div>
     <div id="cats" class="chips"></div>
     <div id="grid" class="items"></div>
   </div>
@@ -171,7 +171,11 @@ dialog form{display:grid;gap:12px}
 <dialog id="billDlg"><form id="billForm">
   <h2 id="billTitle">Bill</h2>
   <div id="payBtns" class="seg"></div>
-  <label>Discount %<input id="bdisc" type="number" min="0" max="100" step="0.5" value="0" inputmode="decimal"></label>
+  <label>Discount</label>
+  <div class="row" style="justify-content:flex-start;margin-top:-6px">
+    <div id="discMode" class="seg" style="grid-template-columns:repeat(2,56px)"><button type="button" data-mode="%">%</button><button type="button" data-mode="₹">₹</button></div>
+    <input id="bdisc" type="number" min="0" step="0.5" value="0" inputmode="decimal">
+  </div>
   <div id="bsum"></div>
   <div class="row"><button type="button" data-close>Back</button><button class="ok">Confirm &amp; print</button></div>
 </form></dialog>
@@ -180,6 +184,14 @@ dialog form{display:grid;gap:12px}
   <h2>Staff PIN</h2>
   <input name="pin" type="password" inputmode="numeric" autocomplete="off" required>
   <button class="pri">Unlock</button>
+</form></dialog>
+
+<dialog id="customDlg"><form id="customForm">
+  <h2>Custom item</h2>
+  <p class="mute" style="margin:0">For this order only - it is billed and printed, but not added to the menu.</p>
+  <label>Item name<input name="cname" maxlength="60" autocomplete="off" required></label>
+  <label>Price ₹<input name="cprice" type="number" min="0" step="0.01" inputmode="decimal" required></label>
+  <div class="row"><button type="button" data-close>Cancel</button><button class="pri">Add to order</button></div>
 </form></dialog>
 
 <dialog id="confirmDlg"><form id="confirmForm">
@@ -329,11 +341,22 @@ function renderGrid() {
   $('#grid').innerHTML = list.map(i => `<button class="item" data-id="${i.id}">${esc(i.name)}<small>${money(i.price)}</small>${cart.get(i.id) ? `<i>${cart.get(i.id)}</i>` : ''}</button>`).join('')
     || '<p class="mute">No matching items.</p>';
 }
-function cartLines() { return [...cart].map(([id, qty]) => ({...items.find(i => i.id === id), qty})) }
+// cart keys: menu item ids (numbers) or 'c1', 'c2'... for custom items typed at the counter
+const custom = new Map();
+let customSeq = 0;
+const cartKey = k => k.startsWith('c') ? k : +k;
+function cartLines() { return [...cart].map(([id, qty]) => ({...(custom.get(id) || items.find(i => i.id === id)), qty})) }
+$('#customBtn').onclick = () => { $('#customForm').reset(); $('#customDlg').showModal(); $('#customForm').cname.focus() };
+$('#customForm').onsubmit = e => {
+  e.preventDefault(); const f = e.target, id = 'c' + (++customSeq);
+  custom.set(id, {id, name: f.cname.value.trim(), price: Math.round(parseFloat(f.cprice.value) * 100), custom: true});
+  $('#customDlg').close();
+  bump(id, 1);
+};
 function renderTicket() {
   const sent = cur.lines.map(l => `<tr><td>${l.qty} × ${esc(l.name)} <span class="tag ${l.kot_status}">${l.kot_status === 'ready' ? 'ready' : 'cooking'}</span></td>
       <td class="r">${money(l.price * l.qty)}</td><td><button class="x" data-del="${l.id}" aria-label="Remove ${esc(l.name)}">✕</button></td></tr>`).join('');
-  const pending = cartLines().map(l => `<tr><td>${esc(l.name)}</td><td class="qty r"><button data-id="${l.id}" data-d="-1" aria-label="Less">−</button> ${l.qty} <button data-id="${l.id}" data-d="1" aria-label="More">+</button></td>
+  const pending = cartLines().map(l => `<tr><td>${esc(l.name)}${l.custom ? ' <span class="tag">custom</span>' : ''}</td><td class="qty r"><button data-id="${l.id}" data-d="-1" aria-label="Less">−</button> ${l.qty} <button data-id="${l.id}" data-d="1" aria-label="More">+</button></td>
       <td class="r">${money(l.price * l.qty)}</td></tr>`).join('');
   $('#ticket').innerHTML = (sent ? `<h3>Sent to kitchen</h3><table>${sent}</table>` : '')
     + (pending ? `<h3>New items</h3><table>${pending}</table>` : '')
@@ -355,13 +378,14 @@ $('#search').oninput = renderGrid;
 $('#back').onclick = () => { if (!cart.size || confirm('Discard items not sent to kitchen?')) { cur = null; cart.clear(); show('floor'); load() } };
 $('#ticket').onclick = e => {
   const b = e.target.closest('button'); if (!b) return;
-  if (b.dataset.d) bump(+b.dataset.id, +b.dataset.d);
+  if (b.dataset.d) bump(cartKey(b.dataset.id), +b.dataset.d);
   if (b.dataset.del && confirm('Remove this item from the order?')) once(async () => { await api('/api/orders/remove_line', {line_id: +b.dataset.del}); await load() });
 };
 async function sendKot() {
   if (!cart.size) return;
   if (!cur.id) cur.id = (await api('/api/orders/new', cur)).id;
-  await api('/api/orders/kot', {order_id: cur.id, note: $('#note').value, lines: [...cart].map(([id, qty]) => ({id, qty}))});
+  await api('/api/orders/kot', {order_id: cur.id, note: $('#note').value, lines: [...cart].map(([id, qty]) => custom.has(id)
+    ? {name: custom.get(id).name, price: (custom.get(id).price / 100).toFixed(2), qty} : {id, qty})});
   cart.clear(); $('#note').value = '';
   await load();
 }
@@ -370,30 +394,35 @@ $('#cancelOrder').onclick = () => confirm('Cancel this whole order? It will show
   once(async () => { await api('/api/orders/cancel', {order_id: cur.id}); cur = null; cart.clear(); await load(); show('floor') });
 
 // ---------- billing ----------
+let discMode = '%';
 function calc(lines, disc) {  // preview only - mirrors totals() in app.py, which is what actually gets billed
-  const sub = lines.reduce((a, l) => a + l.price * l.qty, 0), dis = Math.round(sub * disc / 100);
+  const sub = lines.reduce((a, l) => a + l.price * l.qty, 0);
+  const dis = discMode === '₹' ? Math.min(Math.round(disc * 100), sub) : Math.round(sub * disc / 100);
   const g = Math.round((sub - dis) * (+S.tax_pct / 2) / 100), raw = sub - dis + 2 * g, total = Math.floor((raw + 50) / 100) * 100;
   return {sub, dis, cgst: g, sgst: g, ro: total - raw, total};
 }
 $('#billBtn').onclick = () => once(async () => {
   await sendKot();  // anything still in the cart goes to the kitchen first, so the bill matches what was ordered
   if (!cur) return;
-  pay = 'Cash'; $('#bdisc').value = 0; $('#billTitle').textContent = 'Bill · ' + orderTitle(cur);
+  pay = 'Cash'; discMode = '%'; $('#bdisc').value = 0; $('#billTitle').textContent = 'Bill · ' + orderTitle(cur);
   renderBill(); $('#billDlg').showModal();
 });
 function renderBill() {
   $('#payBtns').innerHTML = PAYMENTS.map(p => `<button type="button" class="${p === pay ? 'on' : ''}" data-pay="${p}">${p}</button>`).join('');
-  const t = calc(cur.lines, +$('#bdisc').value || 0), h = +S.tax_pct / 2;
-  $('#bsum').innerHTML = row('Subtotal', money(t.sub)) + (t.dis ? row('Discount', '−' + money(t.dis)) : '')
+  document.querySelectorAll('#discMode button').forEach(b => b.classList.toggle('on', b.dataset.mode === discMode));
+  const v = +$('#bdisc').value || 0, t = calc(cur.lines, v), h = +S.tax_pct / 2;
+  $('#bsum').innerHTML = row('Subtotal', money(t.sub)) + (t.dis ? row(discMode === '%' ? `Discount ${v}%` : 'Discount', '−' + money(t.dis)) : '')
     + row(`CGST ${h}%`, money(t.cgst)) + row(`SGST ${h}%`, money(t.sgst)) + (t.ro ? row('Round off', money(t.ro)) : '')
     + row('Total', money(t.total), 'big');
 }
 $('#payBtns').onclick = e => { const b = e.target.closest('button'); if (b) { pay = b.dataset.pay; renderBill() } };
 $('#bdisc').oninput = renderBill;
+$('#discMode').onclick = e => { const b = e.target.closest('button'); if (b) { discMode = b.dataset.mode; renderBill(); $('#bdisc').focus() } };
 $('#billForm').onsubmit = e => {
   e.preventDefault();
   once(async () => {
-    const b = await api('/api/orders/bill', {order_id: cur.id, payment: pay, discount_pct: +$('#bdisc').value || 0});
+    const v = +$('#bdisc').value || 0;
+    const b = await api('/api/orders/bill', {order_id: cur.id, payment: pay, ...(discMode === '₹' ? {discount_amt: v} : {discount_pct: v})});
     $('#billDlg').close(); cur = null; cart.clear();
     printReceipt(b);
     await load(); show('floor');
@@ -408,7 +437,7 @@ function printReceipt(b) {
     + row('Bill No: ' + esc(b.bill_label), when) + row(TYPE[b.type] + (b.table_no ? ' · Table ' + b.table_no : ''), 'Paid: ' + esc(b.payment))
     + (b.customer || b.phone ? `<div>${esc(b.customer)} ${esc(b.phone)}</div>` : '') + (b.address ? `<div>${esc(b.address)}</div>` : '')
     + '<hr>' + b.lines.map(l => row(`${esc(l.name)}<br>&nbsp; ${l.qty} × ${money(l.price)}`, money(l.qty * l.price))).join('')
-    + '<hr>' + row('Subtotal', money(b.subtotal)) + (b.discount ? row(`Discount (${b.discount_pct}%)`, '−' + money(b.discount)) : '')
+    + '<hr>' + row('Subtotal', money(b.subtotal)) + (b.discount ? row(+b.discount_pct ? `Discount (${b.discount_pct}%)` : 'Discount', '−' + money(b.discount)) : '')
     + row(`CGST @ ${h}%`, money(b.cgst)) + row(`SGST @ ${h}%`, money(b.sgst)) + (b.round_off ? row('Round off', money(b.round_off)) : '')
     + '<hr>' + row('TOTAL', money(b.total), 'big') + `<hr><div class="c">${esc(S.footer)}</div>`;
   setTimeout(() => window.print(), 50);
