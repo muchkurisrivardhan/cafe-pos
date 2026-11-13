@@ -1,7 +1,7 @@
 """Restaurant POS server (dine-in / takeaway / delivery, KOT, GST billing, daily reports).
 Run: python app.py      Self-check: python app.py test      Windows control window: python gui.py
 Only needs Python 3 - no packages. All data lives in pos.db: back it up."""
-import csv, hmac, json, logging, os, socket, sqlite3, sys, time, webbrowser
+import csv, hmac, json, logging, os, re, socket, sqlite3, sys, threading, time, unicodedata, webbrowser
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +21,7 @@ TYPES = ("dine_in", "takeaway", "delivery")
 PAYMENTS = ("Cash", "UPI", "Card")
 DEFAULT_SETTINGS = {"name": "Guns & Roses Café", "address": "Kondapur, Hyderabad", "phone": "", "gstin": "", "fssai": "",
                     "tax_pct": "5", "tables": "8", "footer": "Thank you! Visit again.",
+                    "printer": "", "paper": "58",  # printer: "" = tablet's print dialog, else COM port of a thermal printer
                     "pin": os.environ.get("POS_PIN") or "1234"}  # set POS_PIN when hosting so a fresh site never has 1234
 
 SCHEMA = """
@@ -198,6 +199,10 @@ def save_settings(con, d):
         raise ValueError("tables must be 1-50")
     if d.get("pin") and not (str(d["pin"]).isdigit() and len(str(d["pin"])) >= 6):
         raise ValueError("PIN must be 6+ digits")
+    if d.get("printer") and not PORT_RE.fullmatch(str(d["printer"])):  # only COM ports, never a file path
+        raise ValueError("printer must be a COM port like COM5")
+    if "paper" in d and d["paper"] not in ("58", "80"):
+        raise ValueError("paper must be 58 or 80 mm")
     for k in DEFAULT_SETTINGS:
         if k in d and not (k == "pin" and not d[k]):  # blank PIN field = keep current
             con.execute("UPDATE settings SET value = ? WHERE key = ?", (str(d[k]).strip(), k))
@@ -331,11 +336,167 @@ def backup(con, q):
     return data
 
 
-GET = {"/api/state": state, "/api/kitchen": kitchen, "/api/report": report, "/api/backup": backup}
+# ---------------- direct printing: ESC/POS thermal printer on a COM port (Bluetooth or USB) ----------------
+PORT_RE = re.compile(r"COM\d{1,3}")
+PRINT_LOCK = threading.Lock()
+
+
+class PrinterError(Exception):
+    pass
+
+
+def printer_ports(con=None, q=None):
+    """COM ports Windows knows about; Bluetooth printers show up as \\Device\\BthModemN."""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DEVICEMAP\SERIALCOMM")
+    except (ImportError, OSError):
+        return {"ports": []}  # not Windows, or no COM ports
+    ports, i = [], 0
+    while True:
+        try:
+            dev, port, _ = winreg.EnumValue(key, i)
+        except OSError:
+            break
+        ports.append({"port": port, "bluetooth": "Bth" in dev})
+        i += 1
+    return {"ports": sorted(ports, key=lambda p: int(p["port"][3:]) if p["port"][3:].isdigit() else 0)}
+
+
+def amt(p):
+    return ("-" if p < 0 else "") + f"{abs(p) / 100:,.2f}"
+
+
+class Ticket:
+    """Plain-text receipt for 58 mm (32 columns) or 80 mm (48 columns) ESC/POS printers."""
+
+    def __init__(self, width):
+        self.w, self.out = width, bytearray(b"\x1b@")  # ESC @ = reset printer
+
+    def line(self, s="", bold=False, center=False, big=False):
+        s = unicodedata.normalize("NFKD", str(s).replace("₹", "Rs.").replace("−", "-").replace("×", "x"))
+        s = s.encode("ascii", "ignore")  # printer fonts are ASCII; "Café" -> "Cafe"
+        big = big and len(s) <= self.w // 2  # double size only if it still fits on one line
+        self.out += b"\x1ba" + (b"\x01" if center else b"\x00") + b"\x1bE" + (b"\x01" if bold else b"\x00")
+        self.out += b"\x1d!" + (b"\x11" if big else b"\x00") + s + b"\n"
+        return self
+
+    def row(self, left, right="", bold=False):
+        left, right = str(left), str(right)
+        if len(left) + len(right) + 1 > self.w:  # too long: right-hand value on its own line
+            return self.line(left, bold).line(right.rjust(self.w), bold)
+        return self.line(left + " " * (self.w - len(left) - len(right)) + right, bold)
+
+    def rule(self):
+        return self.line("-" * self.w)
+
+    def end(self, cut):
+        self.out += b"\x1bd\x04" + (b"\x1dV\x01" if cut else b"")  # feed 4 lines (+ cut on 80 mm cutters)
+        return bytes(self.out)
+
+
+def header(t, s):
+    t.line(s["name"], bold=True, center=True, big=True)
+    for k, label in (("address", ""), ("phone", "Ph: "), ("gstin", "GSTIN: "), ("fssai", "FSSAI: ")):
+        if s.get(k):
+            t.line(label + s[k], center=True)
+    return t
+
+
+def bill_ticket(b, s, w):
+    t = header(Ticket(w), s).line("TAX INVOICE", bold=True, center=True).rule()
+    t.row("Bill No:", b["bill_label"]).row("Date:", datetime.fromisoformat(b["billed"]).strftime("%d/%m/%y %I:%M %p"))
+    t.row({"dine_in": f"Dine-in, Table {b['table_no']}", "takeaway": "Takeaway", "delivery": "Delivery"}[b["type"]],
+          "Paid: " + b["payment"])
+    if b.get("customer") or b.get("phone"):
+        t.line(f"{b.get('customer') or ''} {b.get('phone') or ''}".strip())
+    if b.get("address"):
+        t.line(b["address"])
+    t.rule()
+    for l in b["lines"]:
+        t.line(l["name"]).row(f"  {l['qty']} x {amt(l['price'])}", amt(l["qty"] * l["price"]))
+    t.rule().row("Subtotal", amt(b["subtotal"]))
+    if b["discount"]:
+        t.row(f"Discount ({b['discount_pct']}%)" if Decimal(b["discount_pct"] or 0) else "Discount", amt(-b["discount"]))
+    h = Decimal(b["tax_pct"]) / 2
+    t.row(f"CGST @ {h}%", amt(b["cgst"])).row(f"SGST @ {h}%", amt(b["sgst"]))
+    if b["round_off"]:
+        t.row("Round off", amt(b["round_off"]))
+    t.rule().row("TOTAL Rs.", amt(b["total"]), bold=True).rule()
+    if s.get("footer"):
+        t.line(s["footer"], center=True)
+    return t.end(cut=w >= 48)
+
+
+def day_ticket(r, s, w):
+    sm, h = r["sums"], Decimal(s["tax_pct"]) / 2
+    t = header(Ticket(w), s).line("DAILY SALES REPORT", bold=True, center=True)
+    t.line(date.fromisoformat(r["day"]).strftime("%a %d %b %Y"), center=True)
+    t.line(("Day still open" if r["open"] else "Day closed") + " - printed " + datetime.now().strftime("%d/%m %I:%M %p"), center=True)
+    t.rule().row("Bills", r["count"]).row("Cancelled orders", r["cancelled"]).rule()
+    t.row("Gross", amt(sm["subtotal"])).row("Discounts", amt(-sm["discount"]))
+    t.row(f"CGST @ {h}%", amt(sm["cgst"])).row(f"SGST @ {h}%", amt(sm["sgst"])).row("Round off", amt(sm["round_off"]))
+    t.rule().row("NET SALES Rs.", amt(sm["total"]), bold=True).rule().line("By payment", bold=True)
+    for k, v in r["by_payment"].items():
+        t.row(k, amt(v))
+    t.rule().line("By order type", bold=True)
+    for k, v in r["by_type"].items():
+        t.row({"dine_in": "Dine-in", "takeaway": "Takeaway", "delivery": "Delivery"}[k], amt(v))
+    t.rule().line("Items sold", bold=True)
+    for n, q, a in r["items"]:
+        t.row(f"{q} x {n}", amt(a))
+    return t.rule().line("--- end of report ---", center=True).end(cut=w >= 48)
+
+
+def send_to_printer(port, data, timeout=25):
+    """Write raw ESC/POS bytes to the printer's COM port; Bluetooth connects on open, so allow some seconds."""
+    err = []
+
+    def run():
+        try:
+            with open(rf"\\.\{port}", "wb", buffering=0) as f:
+                f.write(data)
+        except OSError as e:
+            err.append(e)
+    with PRINT_LOCK:  # one print job at a time
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        th.join(timeout)
+    if th.is_alive():
+        raise PrinterError(f"The printer on {port} did not answer. Is it switched on, charged and near the PC?")
+    if err:
+        raise PrinterError(f"Could not print on {port}: {err[0].strerror or err[0]}. Is the printer on and paired?")
+
+
+def print_job(con, d):
+    s = settings(con)
+    port, w = s.get("printer") or "", 32 if s.get("paper", "58") == "58" else 48
+    if not PORT_RE.fullmatch(port):
+        raise ValueError("no printer chosen - pick one in Settings")
+    if d.get("bill"):
+        r = con.execute("SELECT * FROM orders WHERE id = ? AND status = 'billed'", (int(d["bill"]),)).fetchone()
+        if not r:
+            raise ValueError("bill not found")
+        b = order_out(con, r)
+        data, what = bill_ticket(b, s, w), f"bill {b['bill_label']}"
+    elif d.get("day"):
+        data, what = day_ticket(report(con, {"day": [str(d["day"])]}), s, w), f"day report {d['day']}"
+    elif d.get("test"):
+        t = header(Ticket(w), s).line("Printer test", bold=True, center=True).rule()
+        data, what = t.row("Paper", f"{s.get('paper')} mm").row("Port", port).row("Sample", amt(12345)).rule().end(w >= 48), "test page"
+    else:
+        raise ValueError("nothing to print")
+    send_to_printer(port, data)
+    log.info("Printed %s on %s", what, port)
+    return {"ok": True}
+
+
+GET = {"/api/state": state, "/api/kitchen": kitchen, "/api/report": report, "/api/backup": backup,
+       "/api/printers": printer_ports}
 POST = {"/api/items": save_item, "/api/items/delete": delete_item, "/api/settings": save_settings,
         "/api/orders/new": new_order, "/api/orders/kot": send_kot, "/api/orders/remove_line": remove_line,
         "/api/orders/cancel": cancel_order, "/api/orders/bill": bill_order, "/api/kots/ready": kot_ready,
-        "/api/day/close": close_day}
+        "/api/day/close": close_day, "/api/print": print_job}
 
 
 # ponytail: one global lockout, so guessing a 6-digit PIN online takes months; an attacker can also keep
@@ -392,6 +553,9 @@ class Handler(BaseHTTPRequestHandler):
             with con:  # one transaction per request, rolled back on any error
                 out = route(con, arg)
             self.send(out, ctype="application/octet-stream" if isinstance(out, bytes) else "application/json")
+        except PrinterError as e:
+            log.error("Print failed: %s", e)
+            self.send({"error": str(e)}, 503)
         except sqlite3.IntegrityError:
             self.send({"error": "That table already has an open order. Refresh and try again."}, 409)
         except (ValueError, KeyError, TypeError, InvalidOperation) as e:
@@ -479,6 +643,21 @@ def selftest():
         send_kot(con, {"order_id": o3, "lines": [{"id": pid, "qty": 1}]})
         b3 = bill_order(con, {"order_id": o3, "payment": "Cash"})
         assert (b3["day_no"], b3["bill_no"]) == (1, 3) and b3["bill_label"] != b["bill_label"]
+    # printed receipt fits a 58 mm roll (32 columns) and carries the right totals
+    s = settings(con)
+    for w in (32, 48):
+        tk = bill_ticket(b2, s, w)
+        txt = re.sub(rb"\x1b[aE@d].?|\x1d[!V].?", b"", tk).decode()  # strip ESC/POS control codes
+        assert all(len(x) <= w for x in txt.splitlines()), [x for x in txt.splitlines() if len(x) > w]
+        assert "TAX INVOICE" in txt and "Birthday Cake" in txt and "Guns & Roses Cafe" in txt
+        assert amt(b2["total"]) in txt and "Discount" in txt
+    assert b"NET SALES" in day_ticket(report(con, {"day": [b2["day"]]}), s, 32)
+    for bad in ("C:\\pos.db", "..\\x", "LPT1", "COM1;x"):
+        try:
+            save_settings(con, {"printer": bad})
+            raise AssertionError(f"accepted printer {bad!r}")
+        except ValueError:
+            pass
     snap = sqlite3.connect(":memory:")
     snap.deserialize(backup(con, {}))
     assert snap.execute("SELECT total FROM orders WHERE status = 'billed'").fetchone()[0] == 52400  # backup holds the bill
