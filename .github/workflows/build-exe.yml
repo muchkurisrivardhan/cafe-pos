@@ -1,0 +1,35 @@
+name: Build CafePOS.exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # to publish the exe on the "latest" release
+
+jobs:
+  build:
+    runs-on: windows-latest   # x64, so the exe runs on normal café PCs (this dev laptop is ARM)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Self-check (GST maths + order flow)
+        run: python app.py test
+      - name: Build one-file exe
+        run: |
+          pip install pyinstaller==6.11.1
+          pyinstaller --onefile --windowed --name CafePOS --add-data "index.html;." --add-data "menu.csv;." gui.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CafePOS
+          path: dist/CafePOS.exe
+      - name: Publish to the "latest" release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "CafePOS.exe (latest build)" --notes "Built automatically from main. Download CafePOS.exe below."
+          gh release upload latest dist/CafePOS.exe --clobber

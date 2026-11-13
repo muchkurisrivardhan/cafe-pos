@@ -13,6 +13,19 @@ One Windows PC at the counter runs the server, and staff use any iPad or Android
 All data is in `pos.db`. Copy that file somewhere safe every day.
 `menu.csv` only loads on the very first run. After that, edit the menu in the app.
 
+## One-file Windows app: CafePOS.exe (recommended for the café PC)
+Download `CafePOS.exe` from the repo's **Releases → latest** page (it's rebuilt automatically on every push), put it on the Desktop, and double-click it.
+The first time, Windows may say "Windows protected your PC": click **More info → Run anyway**.
+
+The window then:
+- starts the POS and its SQLite database (`%LOCALAPPDATA%\CafePOS\pos.db`, with daily log files in `logs\` next to it)
+- installs Tailscale if it's missing (approve the Windows prompt), starts it, and opens the sign-in page if needed
+- turns on the public link (Tailscale Funnel). The first time on a new tailnet, approve **Enable Funnel** in the page that opens
+- shows the public link, the Wi-Fi link and the database location with Open/Copy buttons, plus a live log of every order, KOT, bill, cancellation, menu change, wrong PIN and error
+- checks everything every 20 seconds and repairs Tailscale or the public link if they drop
+
+Closing the window stops the POS and turns the public link off.
+
 ## Online version (Railway)
 The private GitHub repo deploys itself: every push to `main` updates the website in a couple of minutes.
 1. railway.com → **Login with GitHub** → **New Project** → **Deploy from GitHub repo** → `cafe-pos` (allow Railway access to it).

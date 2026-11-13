@@ -1,7 +1,7 @@
 """Restaurant POS server (dine-in / takeaway / delivery, KOT, GST billing, daily reports).
-Run: python app.py      Self-check: python app.py test
-Only needs Python 3 - no packages. All data lives in pos.db next to this file: back it up."""
-import csv, hmac, json, os, socket, sqlite3, sys, time, webbrowser
+Run: python app.py      Self-check: python app.py test      Windows control window: python gui.py
+Only needs Python 3 - no packages. All data lives in pos.db: back it up."""
+import csv, hmac, json, logging, os, socket, sqlite3, sys, time, webbrowser
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,9 +9,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 HERE = Path(__file__).parent
+FROZEN = getattr(sys, "frozen", False)           # running inside CafePOS.exe
+RES = Path(getattr(sys, "_MEIPASS", HERE))       # index.html + menu.csv (unpacked from the exe)
+# exe keeps data in the user's profile so moving/updating the exe never loses bills
+DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or HERE) / "CafePOS" if FROZEN else HERE
 # Cloud hosting sets these: POS_DB must point at a persistent disk, or data is lost on every redeploy.
-DB = Path(os.environ.get("POS_DB") or HERE / "pos.db")
+DB = Path(os.environ.get("POS_DB") or DATA_DIR / "pos.db")
 PORT = int(os.environ.get("PORT") or 8000)
+log = logging.getLogger("pos")
 TYPES = ("dine_in", "takeaway", "delivery")
 PAYMENTS = ("Cash", "UPI", "Card")
 DEFAULT_SETTINGS = {"name": "Guns & Roses Café", "address": "Kondapur, Hyderabad", "phone": "", "gstin": "", "fssai": "",
@@ -50,7 +55,7 @@ def init(con):
         con.executescript(SCHEMA)
         con.executemany("INSERT OR IGNORE INTO settings VALUES(?, ?)", DEFAULT_SETTINGS.items())
         if not con.execute("SELECT 1 FROM items").fetchone():  # first run: load the starter menu
-            with open(HERE / "menu.csv", encoding="utf-8") as f:
+            with open(RES / "menu.csv", encoding="utf-8") as f:
                 con.executemany("INSERT INTO items(category, name, price) VALUES(?, ?, ?)",
                                 [(r["category"], r["name"], paise(r["price"])) for r in csv.DictReader(f)])
 
@@ -62,6 +67,10 @@ def now():
 # ---- money: integer paise everywhere, half-up rounding ----
 def paise(x):
     return int((Decimal(str(x)) * 100).quantize(Decimal(1), ROUND_HALF_UP))
+
+
+def rs(p):
+    return f"₹{p / 100:,.2f}"
 
 
 def pct(amount, p):
@@ -152,12 +161,14 @@ def save_item(con, d):
         con.execute("UPDATE items SET name = ?, category = ?, price = ? WHERE id = ?", (name, cat, price, int(d["iid"])))
     else:
         con.execute("INSERT INTO items(name, category, price) VALUES(?, ?, ?)", (name, cat, price))
+    log.info("Menu: saved %s (%s) at %s", name, cat, rs(price))
     return {"ok": True}
 
 
 def delete_item(con, d):
     # ponytail: soft delete; past bills keep their own name/price snapshot anyway
     con.execute("UPDATE items SET active = 0 WHERE id = ?", (int(d["id"]),))
+    log.info("Menu: deleted item #%s", d["id"])
     return {"ok": True}
 
 
@@ -171,6 +182,7 @@ def save_settings(con, d):
     for k in DEFAULT_SETTINGS:
         if k in d and not (k == "pin" and not d[k]):  # blank PIN field = keep current
             con.execute("UPDATE settings SET value = ? WHERE key = ?", (str(d[k]).strip(), k))
+    log.info("Settings saved%s", " (PIN changed)" if d.get("pin") else "")
     return {"ok": True}
 
 
@@ -187,6 +199,7 @@ def new_order(con, d):
         raise ValueError("delivery needs phone and address")
     cur = con.execute("INSERT INTO orders(type, table_no, customer, phone, address, created) VALUES(?, ?, ?, ?, ?, ?)",
                       (typ, table, *cust, now()))
+    log.info("Order #%s opened: %s", cur.lastrowid, f"Table {table}" if table else typ.title())
     return {"id": cur.lastrowid}
 
 
@@ -207,6 +220,7 @@ def send_kot(con, d):
                       (oid, now(), str(d.get("note") or "").strip()[:200])).lastrowid
     con.executemany("INSERT INTO lines(order_id, kot_id, item_id, name, price, qty) VALUES(?, ?, ?, ?, ?, ?)",
                     [(oid, kid, *l) for l in lines])
+    log.info("KOT %s -> kitchen for order #%s: %s", kid, oid, ", ".join(f"{q}x {n}" for _, n, _, q in lines))
     return {"id": kid}
 
 
@@ -215,6 +229,7 @@ def remove_line(con, d):
     if not con.execute("DELETE FROM lines WHERE id = ? AND order_id IN (SELECT id FROM orders WHERE status = 'open')",
                        (int(d["line_id"]),)).rowcount:
         raise ValueError("item not found or order already billed")
+    log.info("Item removed from an open order (line #%s)", d["line_id"])
     return {"ok": True}
 
 
@@ -222,11 +237,13 @@ def cancel_order(con, d):
     if not con.execute("UPDATE orders SET status = 'cancelled' WHERE id = ? AND status = 'open'",
                        (int(d["order_id"]),)).rowcount:
         raise ValueError("order is not open")
+    log.warning("Order #%s CANCELLED", d["order_id"])
     return {"ok": True}
 
 
 def kot_ready(con, d):
     con.execute("UPDATE kots SET status = 'ready' WHERE id = ?", (int(d["id"]),))
+    log.info("KOT %s ready", d["id"])
     return {"ok": True}
 
 
@@ -247,7 +264,9 @@ def bill_order(con, d):
             "cgst = ?, sgst = ?, round_off = ?, total = ? WHERE id = ? AND status = 'open'",
             (t, t[:10], payment, sub, disc, dis, tax_pct, cgst, sgst, ro, total, oid)).rowcount:
         raise ValueError("order is not open")
-    return get_order(con, oid)
+    b = get_order(con, oid)
+    log.info("BILL #%s: %s paid by %s (order #%s)", b["bill_no"], rs(total), payment, oid)
+    return b
 
 
 def backup(con, q):
@@ -256,6 +275,7 @@ def backup(con, q):
     con.backup(snap)
     data = snap.serialize()
     snap.close()
+    log.info("Backup downloaded (%d KB)", len(data) // 1024)
     return data
 
 
@@ -288,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         u = urlparse(self.path)
         if u.path == "/":
-            return self.send((HERE / "index.html").read_bytes(), ctype="text/html; charset=utf-8")
+            return self.send((RES / "index.html").read_bytes(), ctype="text/html; charset=utf-8")
         self.api(GET.get(u.path), parse_qs(u.query))
 
     def do_POST(self):
@@ -307,8 +327,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not hmac.compare_digest(self.headers.get("X-Pin", "").encode(), settings(con)["pin"].encode()):
                 LOCK["fails"] += 1
+                if self.headers.get("X-Pin"):  # a blank PIN is just a tablet's first visit
+                    # behind Tailscale Funnel every visitor is 127.0.0.1; the proxy passes the real one along
+                    log.warning("Wrong PIN from %s", self.headers.get("X-Forwarded-For") or self.client_address[0])
                 if LOCK["fails"] >= 5:  # 5 wrong in a row -> everyone locked out for 60 s
                     LOCK.update(fails=0, until=time.time() + 60)
+                    log.warning("5 wrong PINs in a row - POS locked for 60 seconds")
                 time.sleep(1)
                 return self.send({"error": "Wrong PIN"}, 401)
             LOCK["fails"] = 0
@@ -318,7 +342,11 @@ class Handler(BaseHTTPRequestHandler):
         except sqlite3.IntegrityError:
             self.send({"error": "That table already has an open order. Refresh and try again."}, 409)
         except (ValueError, KeyError, TypeError, InvalidOperation) as e:
+            log.warning("Rejected %s: %s", self.path, e)
             self.send({"error": f"Invalid input: {e}"}, 400)
+        except Exception:  # never let one bad request kill the server silently (exe has no console)
+            log.exception("Error handling %s", self.path)
+            self.send({"error": "Server error - see the POS log window."}, 500)
         finally:
             con.close()
 
@@ -368,14 +396,24 @@ def selftest():
     print("ok")
 
 
-if __name__ == "__main__":
-    if sys.argv[1:] == ["test"]:
-        sys.exit(selftest())
+def make_server(port=PORT):
+    """Open (or create) the database and return a ready, not-yet-serving HTTP server."""
+    if FROZEN:
+        DB.parent.mkdir(parents=True, exist_ok=True)
     if not DB.parent.is_dir():  # e.g. POS_DB=/data/pos.db but no volume mounted at /data
-        sys.exit(f"Data folder {DB.parent} does not exist. On Railway: add a Volume with mount path {DB.parent}.")
+        raise SystemExit(f"Data folder {DB.parent} does not exist. On Railway: add a Volume with mount path {DB.parent}.")
     con = db()
     init(con)
     con.close()
+    ThreadingHTTPServer.allow_reuse_address = False  # on Windows, True lets a 2nd copy silently share the port
+    return ThreadingHTTPServer(("0.0.0.0", port), Handler)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == ["test"]:
+        sys.exit(selftest())
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
+    server = make_server()
     print(f"Data file: {DB}", flush=True)
     print(f"POS running.\n  This PC:  http://localhost:{PORT}\n  Tablets (same Wi-Fi) - try these:")
     for ip in lan_ips():
@@ -384,4 +422,4 @@ if __name__ == "__main__":
           "  Default staff PIN is 1234 - change it in Settings.  Close this window to stop.")
     if "--no-browser" not in sys.argv:
         webbrowser.open(f"http://localhost:{PORT}")
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    server.serve_forever()

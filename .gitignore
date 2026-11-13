@@ -2,3 +2,8 @@
 pos.db*
 *.zip
 __pycache__/
+# exe build output
+build/
+dist/
+*.spec
+*.exe
