@@ -430,8 +430,18 @@ $('#billForm').onsubmit = e => {
 };
 // With a printer chosen in Settings, the counter PC prints directly (from any tablet); otherwise use the print dialog.
 function browserPrint() { $('#receipt').style.width = S.paper === '80' ? '72mm' : '48mm'; setTimeout(() => window.print(), 50) }
+// Per-phone switch in Settings: this phone prints on its own Bluetooth printer through the RawBT app (Android).
+const phonePrint = () => { try { return localStorage.getItem('phonePrint') === '1' } catch { return false } };
+function directPrint(job) {  // true = printed without the print dialog
+  if (phonePrint()) {
+    api('/api/print', {...job, phone: true}).then(r => { location.href = 'rawbt:base64,' + r.escpos }).catch(() => {});
+    return true;
+  }
+  if (S.printer) { api('/api/print', job).catch(() => {}); return true }
+  return false;
+}
 function printReceipt(b) {
-  if (S.printer) { api('/api/print', {bill: b.id}).catch(() => {}); return }
+  if (directPrint({bill: b.id})) return;
   const h = +b.tax_pct / 2, when = new Date(b.billed).toLocaleString('en-IN', {dateStyle: 'short', timeStyle: 'short'});
   $('#receipt').innerHTML = `<div class="c"><b class="big">${esc(S.name)}</b>`
     + (S.address ? '<br>' + esc(S.address) : '') + (S.phone ? '<br>Ph: ' + esc(S.phone) : '')
@@ -501,7 +511,7 @@ $('#dayBtn').onclick = () => {
   });
 };
 function printDayReport(r) {  // end-of-day report (Z report)
-  if (S.printer) { api('/api/print', {day: r.day}).catch(() => {}); return }
+  if (directPrint({day: r.day})) return;
   const s = r.sums, h = +S.tax_pct / 2;
   $('#receipt').innerHTML = `<div class="c"><b class="big">${esc(S.name)}</b><br><b>DAILY SALES REPORT</b><br>${fmtDay(r.day)}`
     + `<br>${r.open ? 'Day still open' : 'Day closed'} · printed ${new Date().toLocaleString('en-IN', {dateStyle: 'short', timeStyle: 'short'})}</div><hr>`
@@ -551,10 +561,14 @@ const fieldInput = k => k === 'printer' ? '<select name="printer"><option value=
   : k === 'paper' ? '<select name="paper"><option value="58">58 mm (2 inch)</option><option value="80">80 mm (3 inch)</option></select>'
   : `<input name="${k}" ${k === 'pin' ? 'type="password" inputmode="numeric"' : ''} autocomplete="off">`;
 $('#setForm').innerHTML = FIELDS.map(([k, l]) => `<label>${l}${fieldInput(k)}</label>`).join('')
+  + `<label><input type="checkbox" id="phonePrint" style="width:auto"> Print from <b>this phone</b> on its Bluetooth printer
+      (Android: install the free RawBT app, pair the printer in RawBT, same paper width as above). Only this phone changes.</label>`
   + '<button class="pri">Save settings</button><button type="button" id="testPrint">Print a test page</button>'
   + '<button type="button" id="backupBtn">Download backup of all data</button>';
+$('#phonePrint').onchange = e => { try { localStorage.setItem('phonePrint', e.target.checked ? '1' : '') } catch {} };
 $('#testPrint').onclick = () => {
-  if (!S.printer) return alert('Choose the printer above and press Save settings first.');
+  if (phonePrint()) return directPrint({test: true});
+  if (!S.printer) return alert('Choose the printer above (or tick "Print from this phone") and press Save settings first.');
   once(async () => { await api('/api/print', {test: true}); alert(`Test page sent to ${S.printer}.`) });
 };
 $('#backupBtn').onclick = () => once(async () => {
@@ -566,11 +580,13 @@ $('#backupBtn').onclick = () => once(async () => {
 function renderSettings() {
   const f = $('#setForm');
   for (const [k] of FIELDS) if (k !== 'printer') f.elements[k].value = k === 'pin' ? '' : S[k] ?? '';
+  $('#phonePrint').checked = phonePrint();
   api('/api/printers').then(r => {  // COM ports on the counter PC; Bluetooth printers get one when paired
     const ports = r.ports.map(p => p.port);
     if (S.printer && !ports.includes(S.printer)) ports.push(S.printer);  // saved one, even if unpaired right now
     f.elements.printer.innerHTML = '<option value="">No printer - use the print dialog</option>'
-      + ports.map(p => `<option value="${esc(p)}">${esc(p)}${r.ports.find(x => x.port === p)?.bluetooth ? ' (Bluetooth)' : ''}</option>`).join('');
+      + ports.map(p => { const x = r.ports.find(x => x.port === p) || {};
+        return `<option value="${esc(p)}">${esc(p)}${x.name ? ' - ' + esc(x.name) : x.bluetooth ? ' (Bluetooth)' : ''}</option>` }).join('');
     f.elements.printer.value = S.printer || '';
   }).catch(() => {});
 }

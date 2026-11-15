@@ -1,7 +1,7 @@
 """Restaurant POS server (dine-in / takeaway / delivery, KOT, GST billing, daily reports).
 Run: python app.py      Self-check: python app.py test      Windows control window: python gui.py
 Only needs Python 3 - no packages. All data lives in pos.db: back it up."""
-import csv, hmac, json, logging, os, re, socket, sqlite3, sys, threading, time, unicodedata, webbrowser
+import base64, csv, hmac, json, logging, os, re, socket, sqlite3, sys, threading, time, unicodedata, webbrowser
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -358,9 +358,48 @@ def printer_ports(con=None, q=None):
             dev, port, _ = winreg.EnumValue(key, i)
         except OSError:
             break
-        ports.append({"port": port, "bluetooth": "Bth" in dev})
+        ports.append({"port": port, "bluetooth": "Bth" in dev, "name": bt_names(winreg).get(port, "")})
         i += 1
+    # an "incoming" Bluetooth port (no device behind it) can never be a printer
+    ports = [p for p in ports if not (p["bluetooth"] and p["name"] == "incoming")]
     return {"ports": sorted(ports, key=lambda p: int(p["port"][3:]) if p["port"][3:].isdigit() else 0)}
+
+
+def bt_names(winreg):
+    """COM port -> paired device name, so the list says "COM6 EZO Chota" instead of a bare COM6."""
+    hk, out = winreg.HKEY_LOCAL_MACHINE, {}
+    try:
+        enum = winreg.OpenKey(hk, r"SYSTEM\CurrentControlSet\Enum\BTHENUM")
+    except OSError:
+        return out
+    for i in range(1024):
+        try:
+            svc = winreg.EnumKey(enum, i)
+        except OSError:
+            break
+        if not svc.upper().startswith("{00001101"):  # serial port profile only
+            continue
+        try:
+            sk = winreg.OpenKey(enum, svc)
+            for j in range(64):
+                inst = winreg.EnumKey(sk, j)
+                try:
+                    port = winreg.QueryValueEx(winreg.OpenKey(sk, inst + r"\Device Parameters"), "PortName")[0]
+                except OSError:
+                    continue
+                addr = inst.split("&")[-1].split("_")[0].lower()
+                if addr == "000000000000":
+                    out[port] = "incoming"
+                    continue
+                try:
+                    raw = winreg.QueryValueEx(winreg.OpenKey(
+                        hk, r"SYSTEM\CurrentControlSet\Services\BTHPORT\Parameters\Devices" + "\\" + addr), "Name")[0]
+                    out[port] = bytes(raw).split(b"\0")[0].decode("utf-8", "ignore")
+                except OSError:
+                    pass
+        except OSError:
+            continue
+    return out
 
 
 def amt(p):
@@ -471,7 +510,8 @@ def send_to_printer(port, data, timeout=25):
 def print_job(con, d):
     s = settings(con)
     port, w = s.get("printer") or "", 32 if s.get("paper", "58") == "58" else 48
-    if not PORT_RE.fullmatch(port):
+    phone = d.get("phone")  # the phone prints it itself (RawBT app); just hand back the ESC/POS bytes
+    if not phone and not PORT_RE.fullmatch(port):
         raise ValueError("no printer chosen - pick one in Settings")
     if d.get("bill"):
         r = con.execute("SELECT * FROM orders WHERE id = ? AND status = 'billed'", (int(d["bill"]),)).fetchone()
@@ -483,9 +523,11 @@ def print_job(con, d):
         data, what = day_ticket(report(con, {"day": [str(d["day"])]}), s, w), f"day report {d['day']}"
     elif d.get("test"):
         t = header(Ticket(w), s).line("Printer test", bold=True, center=True).rule()
-        data, what = t.row("Paper", f"{s.get('paper')} mm").row("Port", port).row("Sample", amt(12345)).rule().end(w >= 48), "test page"
+        data, what = t.row("Paper", f"{s.get('paper')} mm").row("Port", port or "phone").row("Sample", amt(12345)).rule().end(w >= 48), "test page"
     else:
         raise ValueError("nothing to print")
+    if phone:
+        return {"escpos": base64.b64encode(data).decode()}
     send_to_printer(port, data)
     log.info("Printed %s on %s", what, port)
     return {"ok": True}
@@ -652,6 +694,8 @@ def selftest():
         assert "TAX INVOICE" in txt and "Birthday Cake" in txt and "Guns & Roses Cafe" in txt
         assert amt(b2["total"]) in txt and "Discount" in txt
     assert b"NET SALES" in day_ticket(report(con, {"day": [b2["day"]]}), s, 32)
+    # phone printing (RawBT) needs no COM port and gets the same receipt bytes back
+    assert base64.b64decode(print_job(con, {"bill": b2["id"], "phone": True})["escpos"]) == bill_ticket(b2, settings(con), 32)
     for bad in ("C:\\pos.db", "..\\x", "LPT1", "COM1;x"):
         try:
             save_settings(con, {"printer": bad})
